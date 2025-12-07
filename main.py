@@ -76,7 +76,7 @@ def _get_client():
         try:
             if _neo:
                 _LOGGER.info("Logging in to Neo API (attempt %d)", attempt)
-                _neo.login(mobile_number=mobile_no, ucc=ucc, totp=totp)
+                _neo.totp_login(mobile_number=mobile_no, ucc=ucc, totp=totp)
 
                 _LOGGER.info("Kotak Neo API session established.")
                 _neo.totp_validate(mpin=mpin)

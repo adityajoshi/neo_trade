@@ -2,6 +2,7 @@ import os
 import time
 import logging
 from typing import Optional, Dict, Any
+import getpass
 
 from neo_api_client import NeoAPI
 from neo_api_client.exceptions import ApiException
@@ -53,7 +54,16 @@ def _get_client():
     environment = os.getenv("ENV", "prod")
     mobile_no = os.getenv("MOBILE_NO")
     ucc = os.getenv("UCC")
+    # Prefer environment variable, otherwise request TOTP interactively
     totp = os.getenv("TOTP")
+    if not totp:
+        try:
+            totp = getpass.getpass("Enter TOTP (input hidden): ").strip()
+            if totp == "":
+                totp = None
+        except Exception:
+            totp = None
+
     mpin = os.getenv("MPIN")
 
     # Create client

@@ -123,6 +123,7 @@ def search_stock(symbol: str) -> Optional[Dict[str, Any]]:
             if not data or not data.get("data"):
                 _LOGGER.info("No search results for symbol=%s", symbol)
                 return None
+            print(data)
             return data["data"][0]
 
         except ApiException as e:

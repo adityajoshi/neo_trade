@@ -119,7 +119,7 @@ def search_stock(symbol: str) -> Optional[Dict[str, Any]]:
     # Retry once on auth error after reinitializing the client
     for attempt in range(2):
         try:
-            data = client.scrip_search(exchange_segment="nse_cm", symbol=symbol.upper())
+            data = client.search_scrip(exchange_segment="nse_cm", symbol=symbol.upper(),  expiry = "", option_type = "", strike_price = "")
             if not data or not data.get("data"):
                 _LOGGER.info("No search results for symbol=%s", symbol)
                 return None

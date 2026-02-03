@@ -1,184 +1,112 @@
-import os
-import logging
-import getpass
-from typing import Optional, Dict, Any
-
 from neo_api_client import NeoAPI
-from neo_api_client.exceptions import ApiException
+import datetime
+import csv
+import argparse
+import os
+import getpass
 
-# Optional dotenv
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except Exception:
     pass
 
-
-_LOGGER = logging.getLogger(__name__)
-if not logging.getLogger().handlers:
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s %(levelname)s %(name)s: %(message)s"
-    )
-
-
-class SessionManager:
-    def __init__(self):
-        self._client: Optional[NeoAPI] = None
-
-    # ----------------------------
-    # Internal helpers
-    # ----------------------------
-    def _require_env_vars(self, names):
-        missing = [n for n in names if not os.getenv(n)]
-        if missing:
-            raise RuntimeError(
-                f"Missing required environment variables: {', '.join(missing)}"
-            )
-
-    def _invalidate(self):
-        _LOGGER.warning("Invalidating Neo API session")
-        self._client = None
-
-    def _authenticate(self) -> NeoAPI:
-        """Create + fully authenticate a new NeoAPI client."""
-        self._require_env_vars(
-            ["NEO_FIN_KEY", "CONSUMER_KEY", "MOBILE_NO", "UCC", "MPIN"]
+def require_env_vars(names):
+    missing = [n for n in names if not os.getenv(n)]
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}"
         )
 
-        neo = NeoAPI(
-            environment=os.getenv("ENV", "prod"),
-            access_token=None,
-            neo_fin_key=os.getenv("NEO_FIN_KEY"),
-            consumer_key=os.getenv("CONSUMER_KEY"),
-        )
 
-        totp = os.getenv("TOTP") or getpass.getpass("Enter TOTP: ")
+def read_stocks_from_csv(filename):
+    """
+    Reads a CSV file containing stock trading information.
+    The CSV should have columns: stock_id;buy_or_sell;quantity
+    Returns a list of dictionaries with the stock data.
+    """
+    stocks = []
+    try:
+        with open(filename, 'r') as file:
+            reader = csv.reader(file, delimiter=';')
+            for row in reader:
+                if len(row) == 3:
+                    stock_id, txn_type, qty = row
+                    stocks.append({
+                        'stock_id': stock_id,
+                        'txn_type': txn_type,
+                        'qty': int(qty)
+                    })
+    except FileNotFoundError:
+        print(f"Error: File '{filename}' not found.")
+    except ValueError as e:
+        print(f"Error parsing CSV: {e}")
+    return stocks
 
-        _LOGGER.info("Performing Neo API login")
-        neo.totp_login(
-            mobile_number=os.getenv("MOBILE_NO"),
-            ucc=os.getenv("UCC"),
-            totp=totp,
-        )
+def book_trade(totp, cred_details, trade_details):
+    try:
+        stock_id = trade_details['stock_id']
+        txn_type = trade_details['txn_type']
+        qty = trade_details['qty']
+        tracker_id = trade_details['tracker_id']
+        
+        client = NeoAPI(environment='prod', access_token=None, neo_fin_key=cred_details['neo_fin_key'], consumer_key=cred_details['consumer_key'])
+        if client:
+            client.totp_login(mobile_number=cred_details['mobno'], ucc=cred_details['ucc'], totp=totp)
+            client.totp_validate(mpin=cred_details['mpin'])
 
-        neo.totp_validate(mpin=os.getenv("MPIN"))
-
-        _LOGGER.info("Neo API session fully authenticated")
-        return neo
-
-    def get_client(self) -> NeoAPI:
-        """Public gatekeeper. Always returns a fully authenticated client."""
-        if self._client:
-            return self._client
-
-        self._client = self._authenticate()
-        return self._client
-
-    # ----------------------------
-    # Public API wrappers
-    # ----------------------------
-    def search_stock(self, symbol: str) -> Optional[Dict[str, Any]]:
-        if not symbol or not symbol.strip():
-            raise ValueError("symbol must be a non-empty string")
-
-        for attempt in range(2):
-            try:
-                client = self.get_client()
-                data = client.search_scrip(
-                    exchange_segment="nse_cm",
-                    symbol=symbol.upper(),
-                    expiry="",
-                    option_type="",
-                    strike_price="",
+        client.place_order(
+                exchange_segment="nse_cm",
+                product="CNC",
+                price="0",
+                order_type="MKT",
+                quantity=qty,
+                validity="DAY",
+                trading_symbol=stock_id,
+                transaction_type=txn_type,
+                amo="NO",
+                disclosed_quantity="0",
+                market_protection="0",
+                pf="N",
+                trigger_price="0",
+                tag=tracker_id,
+                scrip_token=None,
+                square_off_type=None,
+                stop_loss_type=None,
+                stop_loss_value=None,
+                square_off_value=None,
+                last_traded_price=None,
+                trailing_stop_loss=None,
+                trailing_sl_value=None,
                 )
+        print(f"Order placed for {stock_id}")
+    except Exception as e:
+        print(f"Error placing order for {stock_id}: {e}")
 
-                if not data or not data.get("data"):
-                    _LOGGER.info("No search results for %s", symbol)
-                    return None
-
-                return data["data"][0]
-
-            except ApiException as e:
-                _LOGGER.warning("Search failed (attempt %d): %s", attempt + 1, e)
-                if attempt == 0 and self._is_auth_error(e):
-                    self._invalidate()
-                    continue
-                return None
-
-    def buy_stock(
-        self,
-        symbol: str,
-        qty: int,
-        price: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
-        if qty <= 0:
-            raise ValueError("qty must be positive")
-
-        result = self.search_stock(symbol)
-        if not result:
-            return None
-
-        order_type = "MKT" if price is None else "L"
-
-        for attempt in range(2):
-            try:
-                client = self.get_client()
-                return client.place_order(
-                    exchange_segment="nse_cm",
-                    transaction_type="B",
-                    product="CNC",
-                    instrument_token=str(result["instrument_token"]),
-                    price=price or 0,
-                    quantity=qty,
-                    order_type=order_type,
-                    validity="DAY",
-                )
-
-            except ApiException as e:
-                _LOGGER.warning("Buy failed (attempt %d): %s", attempt + 1, e)
-                if attempt == 0 and self._is_auth_error(e):
-                    self._invalidate()
-                    continue
-                return None
-
-    def sell_stock(
-        self,
-        symbol: str,
-        qty: int,
-        price: Optional[float] = None,
-    ) -> Optional[Dict[str, Any]]:
-        if qty <= 0:
-            raise ValueError("qty must be positive")
-
-        result = self.search_stock(symbol)
-        if not result:
-            return None
-
-        order_type = "MKT" if price is None else "L"
-
-        for attempt in range(2):
-            try:
-                client = self.get_client()
-                return client.place_order(
-                    exchange_segment="nse_cm",
-                    transaction_type="S",
-                    product="CNC",
-                    instrument_token=str(result["instrument_token"]),
-                    price=price or 0,
-                    quantity=qty,
-                    order_type=order_type,
-                    validity="DAY",
-                )
-
-            except ApiException as e:
-                _LOGGER.warning("Sell failed (attempt %d): %s", attempt + 1, e)
-                if attempt == 0 and self._is_auth_error(e):
-                    self._invalidate()
-                    continue
-                return None
-
-    @staticmethod
-    def _is_auth_error(exc: Exception) -> bool:
-        msg = str(exc)
-        return "401" in msg or "Unauthorized" in msg or "2fa" in msg.lower()
+if __name__ == '__main__':
+    try:
+        require_env_vars(['NEO_FIN_KEY', 'CONSUMER_KEY', 'MOBILE_NO', 'UCC', 'MPIN'])
+        
+        cred_details = {
+            'neo_fin_key': os.getenv('NEO_FIN_KEY'),
+            'consumer_key': os.getenv('CONSUMER_KEY'),
+            'ucc': os.getenv('UCC'),
+            'mobno': os.getenv('MOBILE_NO'),
+            'mpin': os.getenv('MPIN')    
+        }
+        
+        totp = getpass.getpass("Enter TOTP: ")
+        
+        stocks = read_stocks_from_csv('trades.csv')
+        for stock in stocks:
+            stock_id, txn_type, qty, tracker_id = stock['stock_id'], stock['txn_type'], stock['qty'], stock['stock_id']+"-"+datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+            trade_details = {
+                'stock_id': stock_id,
+                'txn_type': txn_type,
+                'qty': qty,
+                'tracker_id': tracker_id
+            }
+            book_trade(totp, cred_details, trade_details)
+    except Exception as e:
+        print(f"Unexpected error: {e}")

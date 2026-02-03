@@ -3,9 +3,10 @@
 A Python script to automate stock trading using the NeoAPI client. It reads trade instructions from a CSV file, authenticates with TOTP, and places orders.
 
 ## Overview
-- **Main file**: `main.py` — Reads stocks from a CSV, authenticates, and executes trades.
-- **CSV format**: Semicolon-separated columns: `stock_id;txn_type;quantity`.
-- **Authentication**: Uses TOTP for login via NeoAPI.
+- **Main file**: `main.py` — Reads trades from a CSV, authenticates with TOTP, and places orders using the NeoAPI client.
+- **CSV format**: Semicolon-separated columns: `stock_id;txn_type;quantity;order_type` (e.g., `PAGEIND-EQ;B;1;MKT`).
+- **Notes**: `quantity` must be an integer. `order_type` (for example `MKT`) determines the order execution type. The script generates a `tracker_id` for each trade (stock_id + timestamp).
+- **Authentication**: Uses TOTP (entered interactively when running `main.py`) and validates with MPIN.
 
 ## Requirements
 - Python 3.x
@@ -32,7 +33,13 @@ pip install -r requirements.txt
    MPIN=your_mpin
    ```
 
-3. Prepare a CSV file named `trades.csv` in the same directory with the format above.
+3. Prepare a CSV file named `trades.csv` in the same directory with semicolon-separated rows matching the format: `stock_id;txn_type;quantity;order_type`.
+
+   Example:
+   ```
+   PAGEIND-EQ;B;1;MKT
+   PGHH-EQ;B;1;MKT
+   ```
 
 ## Run
 ```bash

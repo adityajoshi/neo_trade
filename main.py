@@ -32,11 +32,12 @@ def read_stocks_from_csv(filename):
             reader = csv.reader(file, delimiter=';')
             for row in reader:
                 if len(row) == 3:
-                    stock_id, txn_type, qty = row
+                    stock_id, txn_type, qty, order_type = row
                     stocks.append({
                         'stock_id': stock_id,
                         'txn_type': txn_type,
-                        'qty': int(qty)
+                        'qty': int(qty),
+                        'order_type': order_type
                     })
     except FileNotFoundError:
         print(f"Error: File '{filename}' not found.")
@@ -50,6 +51,7 @@ def book_trade(totp, cred_details, trade_details):
         txn_type = trade_details['txn_type']
         qty = trade_details['qty']
         tracker_id = trade_details['tracker_id']
+        ord_type = trade_details['order_type']
         
         client = NeoAPI(environment='prod', access_token=None, neo_fin_key=cred_details['neo_fin_key'], consumer_key=cred_details['consumer_key'])
         if client:
@@ -60,7 +62,7 @@ def book_trade(totp, cred_details, trade_details):
                 exchange_segment="nse_cm",
                 product="CNC",
                 price="0",
-                order_type="MKT",
+                order_type=ord_type,
                 quantity=qty,
                 validity="DAY",
                 trading_symbol=stock_id,
@@ -100,12 +102,13 @@ if __name__ == '__main__':
         
         stocks = read_stocks_from_csv('trades.csv')
         for stock in stocks:
-            stock_id, txn_type, qty, tracker_id = stock['stock_id'], stock['txn_type'], stock['qty'], stock['stock_id']+"-"+datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+            stock_id, txn_type, qty, order_type, tracker_id = stock['stock_id'], stock['txn_type'], stock['qty'], stock[order_type'], stock['stock_id']+"-"+datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
             trade_details = {
                 'stock_id': stock_id,
                 'txn_type': txn_type,
                 'qty': qty,
-                'tracker_id': tracker_id
+                'tracker_id': tracker_id,
+                'order_type': order_type
             }
             book_trade(totp, cred_details, trade_details)
     except Exception as e:

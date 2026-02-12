@@ -31,7 +31,7 @@ def read_stocks_from_csv(filename):
         with open(filename, 'r') as file:
             reader = csv.reader(file, delimiter=';')
             for row in reader:
-                if len(row) == 3:
+                if len(row) == 4:
                     stock_id, txn_type, qty, order_type = row
                     stocks.append({
                         'stock_id': stock_id,
@@ -102,13 +102,13 @@ if __name__ == '__main__':
         
         stocks = read_stocks_from_csv('trades.csv')
         for stock in stocks:
-            stock_id, txn_type, qty, order_type, tracker_id = stock['stock_id'], stock['txn_type'], stock['qty'], stock[order_type'], stock['stock_id']+"-"+datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+            tracker_id = stock['stock_id'] + "-" + datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
             trade_details = {
-                'stock_id': stock_id,
-                'txn_type': txn_type,
-                'qty': qty,
+                'stock_id': stock['stock_id'],
+                'txn_type': stock['txn_type'],
+                'qty': stock['qty'],
                 'tracker_id': tracker_id,
-                'order_type': order_type
+                'order_type': stock['order_type']
             }
             book_trade(totp, cred_details, trade_details)
     except Exception as e:

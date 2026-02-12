@@ -1,31 +1,33 @@
-# neo_trade
+# Neo Trade
 
-A Python script to automate stock trading using the NeoAPI client. It reads trade instructions from a CSV file, authenticates with TOTP, and places orders.
+A Python project to automate stock trading using the NeoAPI client (Kotak Neo). It includes scripts to place orders from a CSV file and to search for stock scrips.
 
-## Overview
-- **Main file**: `main.py` — Reads trades from a CSV, authenticates with TOTP, and places orders using the NeoAPI client.
-- **CSV format**: Semicolon-separated columns: `stock_id;txn_type;quantity;order_type` (e.g., `PAGEIND-EQ;B;1;MKT`).
-- **Notes**: `quantity` must be an integer. `order_type` (for example `MKT`) determines the order execution type. The script generates a `tracker_id` for each trade (stock_id + timestamp).
-- **Authentication**: Uses TOTP (entered interactively when running `main.py`) and validates with MPIN.
+## Features
+- **Automated Trading**: Reads trade instructions from a CSV file and places orders.
+- **Scrip Search**: Utility to search for stock symbols and get details.
+- **Secure Authentication**: Uses environment variables for credentials and interactive TOTP for login.
 
-## Requirements
+## Prerequisites
 - Python 3.x
-- Dependencies listed in `requirements.txt`
+- Kotak Neo API credentials (sign up at Kotak Neo API portal)
 
-Install dependencies:
-```bash
-pip install -r requirements.txt
-```
+## Installation
 
-## Setup
-1. Copy `sample.env` to `.env` and fill in your credentials:
+1. Clone the repository (if applicable) or download the source code.
+2. Install the required dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+## Configuration
+
+1. Copy the sample environment file to `.env`:
    ```bash
    cp sample.env .env
-   # Edit .env with real values
    ```
 
-2. Required environment variables (in `.env`):
-   ```
+2. Edit `.env` and fill in your Kotak Neo credentials:
+   ```ini
    NEO_FIN_KEY=your_neo_fin_key
    CONSUMER_KEY=your_consumer_key
    MOBILE_NO=your_mobile_number
@@ -33,28 +35,63 @@ pip install -r requirements.txt
    MPIN=your_mpin
    ```
 
-3. Prepare a CSV file named `trades.csv` in the same directory with semicolon-separated rows matching the format: `stock_id;txn_type;quantity;order_type`.
+## Usage
 
-   Example:
-   ```
+### 1. Placing Orders (`main.py`)
+
+This script reads trade instructions from `trades.csv`, authenticates, and places orders.
+
+1. Create a `trades.csv` file in the project root. The format is **semicolon-separated** with the following columns:
+   `stock_id;txn_type;quantity;order_type`
+
+   **Example `trades.csv`**:
+   ```csv
    PAGEIND-EQ;B;1;MKT
    PGHH-EQ;B;1;MKT
    ```
+   - `stock_id`: Trading symbol (e.g., `PAGEIND-EQ`)
+   - `txn_type`: Transaction type (`B` for Buy, `S` for Sell)
+   - `quantity`: Number of shares (integer)
+   - `order_type`: Order type (e.g., `MKT`, `L` for Limit)
 
-## Run
+2. Run the script:
+   ```bash
+   python main.py
+   ```
+
+3. Enter your TOTP when prompted. The script will process each row in `trades.csv` and place the order.
+
+### 2. Searching Scrips (`search.py`)
+
+This utility allows you to search for a stock symbol in the NSE Cash Market (nse_cm) segment.
+
+Run the script with the `--symbol` argument:
 ```bash
-python main.py
+python search.py --symbol <STOCK_SYMBOL>
 ```
-Enter your TOTP when prompted. The script will process the CSV and place orders.
 
-## Files
-- `main.py` — Main script
-- `requirements.txt` — Python dependencies
-- `sample.env` — Template for environment variables
-- `README.md` — This file
-- `.gitignore` — Ignores `.env`, `__pycache__`, etc.
+**Example:**
+```bash
+python search.py --symbol RELIANCE
+```
 
-## Notes
-- Ensure `.env` is not committed (added to `.gitignore`).
-- The script handles exceptions and prints errors for robustness.
-- For public sharing, use `sample.env` and avoid committing secrets.
+This will output the scrip details returned by the API.
+
+## File Structure
+
+- `main.py`: Main script for placing orders from CSV.
+- `search.py`: Utility script for searching scrip details.
+- `trades.csv`: Input file for trade instructions (user-created).
+- `requirements.txt`: Python dependencies.
+- `sample.env`: Template for environment variables.
+- `README.md`: Project documentation.
+
+## Troubleshooting
+
+- **Missing Environment Variables**: If you see an error about missing environment variables, ensure you have created the `.env` file and it contains all the required keys (`NEO_FIN_KEY`, `CONSUMER_KEY`, etc.).
+- **CSV Errors**: Ensure `trades.csv` exists and uses semicolons (`;`) as delimiters, not commas.
+- **Authentication Failed**: Double-check your MPIN and ensure the TOTP you enter is current.
+- **Dependencies**: If running `search.py` fails with module errors, make sure you ran `pip install -r requirements.txt`. Note that `neo-api-client` is installed from a git repository.
+
+## Disclaimer
+This software is for educational purposes only. Use it at your own risk. The authors are not responsible for any financial losses incurred.

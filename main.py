@@ -167,7 +167,7 @@ if __name__ == '__main__':
                 else:
                     fail_count += 1
 
-        print(f"\nSummary: {success_count} successful, {fail_count} failed.")
+            print(f"\nSummary: {success_count} successful, {fail_count} failed.")
 
     except Exception as e:
         print(f"Unexpected error: {e}")

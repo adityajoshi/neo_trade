@@ -46,43 +46,39 @@ def read_stocks_from_csv(filename):
         print(f"Error parsing CSV: {e}")
     return stocks
 
-def get_authenticated_client(cred_details, totp):
-    """
-    Initializes and authenticates the NeoAPI client.
-    """
+def login_client(totp, cred_details):
+    client = NeoAPI(environment='prod', access_token=None, neo_fin_key=cred_details['neo_fin_key'], consumer_key=cred_details['consumer_key'])
+    if client:
+        client.totp_login(mobile_number=cred_details['mobno'], ucc=cred_details['ucc'], totp=totp)
+        client.totp_validate(mpin=cred_details['mpin'])
+    return client
+
+def get_holdings(client):
     try:
-        client = NeoAPI(
-            environment='prod',
-            access_token=None,
-            neo_fin_key=cred_details['neo_fin_key'],
-            consumer_key=cred_details['consumer_key']
-        )
-        
-        if client:
-            client.totp_login(
-                mobile_number=cred_details['mobno'],
-                ucc=cred_details['ucc'],
-                totp=totp
-            )
-            client.totp_validate(mpin=cred_details['mpin'])
-            return client
+        response = client.holdings()
+        if 'data' in response and response['data']:
+            print(f"{'Symbol':<15} {'Qty':<10} {'Avg Price':<15} {'Closing Price':<15}")
+            print("-" * 55)
+            for holding in response['data']:
+                symbol = holding.get('symbol', 'N/A')
+                qty = holding.get('quantity', 0)
+                avg_price = holding.get('averagePrice', 0.0)
+                ltp = holding.get('closingPrice', 0.0)
+                print(f"{symbol:<15} {qty:<10} {avg_price:<15.2f} {ltp:<15.2f}")
+        else:
+            print("No holdings found.")
     except Exception as e:
-        print(f"Authentication failed: {e}")
-        return None
-    return None
+        print(f"Error fetching holdings: {e}")
 
-def book_trade(client, trade_details, dry_run=False):
-    stock_id = trade_details['stock_id']
-    txn_type = trade_details['txn_type']
-    qty = trade_details['qty']
-    tracker_id = trade_details['tracker_id']
-    ord_type = trade_details['order_type']
-
-    if dry_run:
-        print(f"[DRY RUN] Would place order: {txn_type} {qty} {stock_id} @ {ord_type}")
-        return True
-
+def book_trade(client, cred_details, trade_details):
     try:
+        stock_id = trade_details['stock_id']
+        txn_type = trade_details['txn_type']
+        qty = trade_details['qty']
+        tracker_id = trade_details['tracker_id']
+        ord_type = trade_details['order_type']
+
+
         client.place_order(
                 exchange_segment="nse_cm",
                 product="CNC",
@@ -119,6 +115,7 @@ if __name__ == '__main__':
         parser = argparse.ArgumentParser(description='Place orders from CSV using NeoAPI.')
         parser.add_argument('--csv', default='trades.csv', help='Path to the CSV file containing trades')
         parser.add_argument('--dry-run', action='store_true', help='Simulate trades without placing orders')
+        parser.add_argument('--holdings', action='store_true', help="Display current holdings")
         args = parser.parse_args()
 
         if not args.dry_run:
@@ -132,38 +129,43 @@ if __name__ == '__main__':
             'mpin': os.getenv('MPIN')    
         }
         
-        stocks = read_stocks_from_csv(args.csv)
-        if not stocks:
-            print("No stocks to trade or file not found/empty.")
-            sys.exit(0)
-
         client = None
         if not args.dry_run:
             totp = getpass.getpass("Enter TOTP: ")
-            client = get_authenticated_client(cred_details, totp)
+            client = login_client(totp, cred_details)
             if not client:
                 print("Failed to authenticate. Exiting.")
                 sys.exit(1)
             print("Authentication successful. Processing trades...")
         else:
             print("Running in DRY RUN mode. No orders will be placed.")
+            # terminate script when dry run, mimic earlier behavior
+            sys.exit(0)
         
-        success_count = 0
-        fail_count = 0
+        if args.holdings:
+            get_holdings(client)
+        else:
+            success_count = 0
+            fail_count = 0
+            stocks = read_stocks_from_csv(args.csv)
+            if not stocks:
+                print("No stocks to trade or file not found/empty.")
+                sys.exit(0)
 
-        for stock in stocks:
-            tracker_id = stock['stock_id'] + "-" + datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
-            trade_details = {
-                'stock_id': stock['stock_id'],
-                'txn_type': stock['txn_type'],
-                'qty': stock['qty'],
-                'tracker_id': tracker_id,
-                'order_type': stock['order_type']
-            }
-            if book_trade(client, trade_details, dry_run=args.dry_run):
-                success_count += 1
-            else:
-                fail_count += 1
+
+            for stock in stocks:
+                tracker_id = stock['stock_id'] + "-" + datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
+                trade_details = {
+                    'stock_id': stock['stock_id'],
+                    'txn_type': stock['txn_type'],
+                    'qty': stock['qty'],
+                    'tracker_id': tracker_id,
+                    'order_type': stock['order_type']
+                }
+                if book_trade(client, trade_details, dry_run=args.dry_run):
+                    success_count += 1
+                else:
+                    fail_count += 1
 
         print(f"\nSummary: {success_count} successful, {fail_count} failed.")
 

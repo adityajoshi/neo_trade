@@ -139,7 +139,8 @@ if __name__ == '__main__':
             print("Authentication successful. Processing trades...")
         else:
             print("Running in DRY RUN mode. No orders will be placed.")
-            return True
+            # terminate script when dry run, mimic earlier behavior
+            sys.exit(0)
         
         if args.holdings:
             get_holdings(client)

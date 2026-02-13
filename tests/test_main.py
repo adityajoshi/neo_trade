@@ -2,11 +2,13 @@ import unittest
 from unittest.mock import patch, MagicMock, mock_open
 import sys
 import os
+import io
 
 # Ensure the parent directory is in the path to import main
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
-from main import read_stocks_from_csv, get_authenticated_client, book_trade
+from main import read_stocks_from_csv, login_client, get_holdings, book_trade
+
 
 class TestReadStocksFromCSV(unittest.TestCase):
     def test_read_valid_csv(self):
@@ -34,7 +36,8 @@ class TestReadStocksFromCSV(unittest.TestCase):
             stocks = read_stocks_from_csv("invalid.csv")
             self.assertEqual(stocks, [])
 
-class TestGetAuthenticatedClient(unittest.TestCase):
+
+class TestLoginClient(unittest.TestCase):
     @patch('main.NeoAPI')
     def test_successful_login(self, MockNeoAPI):
         mock_client_instance = MockNeoAPI.return_value
@@ -47,7 +50,7 @@ class TestGetAuthenticatedClient(unittest.TestCase):
         }
         totp = '123456'
 
-        client = get_authenticated_client(cred_details, totp)
+        client = login_client(totp, cred_details)
 
         MockNeoAPI.assert_called_once_with(
             environment='prod',
@@ -73,8 +76,73 @@ class TestGetAuthenticatedClient(unittest.TestCase):
             'ucc': 'ucc123',
             'mpin': '1234'
         }
-        client = get_authenticated_client(cred_details, '123456')
-        self.assertIsNone(client)
+
+        with self.assertRaises(Exception):
+            login_client('123456', cred_details)
+
+
+class TestGetHoldings(unittest.TestCase):
+    def test_get_holdings_success(self):
+        mock_client = MagicMock()
+        mock_client.holdings.return_value = {
+            'data': [
+                {
+                    'symbol': 'TATASTEEL',
+                    'quantity': 10,
+                    'averagePrice': 100.0,
+                    'closingPrice': 105.0
+                },
+                {
+                    'symbol': 'RELIANCE',
+                    'quantity': 5,
+                    'averagePrice': 2000.0,
+                    'closingPrice': 2050.0
+                }
+            ]
+        }
+
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        get_holdings(mock_client)
+
+        sys.stdout = sys.__stdout__
+        output = captured_output.getvalue()
+        self.assertIn('TATASTEEL', output)
+        self.assertIn('10', output)
+        self.assertIn('100.00', output)
+        self.assertIn('105.00', output)
+        self.assertIn('RELIANCE', output)
+        self.assertIn('5', output)
+        self.assertIn('2000.00', output)
+        self.assertIn('2050.00', output)
+
+    def test_get_holdings_empty(self):
+        mock_client = MagicMock()
+        mock_client.holdings.return_value = {'data': []}
+
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        get_holdings(mock_client)
+
+        sys.stdout = sys.__stdout__
+        output = captured_output.getvalue()
+        self.assertIn("No holdings found.", output)
+
+    def test_get_holdings_error(self):
+        mock_client = MagicMock()
+        mock_client.holdings.side_effect = Exception("API Error")
+
+        captured_output = io.StringIO()
+        sys.stdout = captured_output
+
+        get_holdings(mock_client)
+
+        sys.stdout = sys.__stdout__
+        output = captured_output.getvalue()
+        self.assertIn("Error fetching holdings: API Error", output)
+
 
 class TestBookTrade(unittest.TestCase):
     def setUp(self):
@@ -86,15 +154,11 @@ class TestBookTrade(unittest.TestCase):
             'tracker_id': 'tracker1',
             'order_type': 'MKT'
         }
-
-    def test_dry_run(self):
-        # Should not call place_order
-        result = book_trade(self.client, self.trade_details, dry_run=True)
-        self.assertTrue(result)
-        self.client.place_order.assert_not_called()
+        # dummy cred details, not actually used by current implementation
+        self.cred_details = {'irrelevant': True}
 
     def test_successful_trade(self):
-        result = book_trade(self.client, self.trade_details, dry_run=False)
+        result = book_trade(self.client, self.cred_details, self.trade_details)
         self.assertTrue(result)
         self.client.place_order.assert_called_once_with(
             exchange_segment="nse_cm",
@@ -123,160 +187,10 @@ class TestBookTrade(unittest.TestCase):
 
     def test_failed_trade(self):
         self.client.place_order.side_effect = Exception("Order failed")
-        result = book_trade(self.client, self.trade_details, dry_run=False)
+        result = book_trade(self.client, self.cred_details, self.trade_details)
         self.assertFalse(result)
         self.client.place_order.assert_called_once()
 
-if __name__ == '__main__':
-    unittest.main()
-import unittest
-from unittest.mock import MagicMock, patch
-import sys
-import io
-import os
-
-# Add parent directory to path to import main
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from main import login_client, get_holdings, book_trade
-
-class TestMain(unittest.TestCase):
-
-    @patch('main.NeoAPI')
-    def test_login_client(self, mock_neo_api):
-        # Setup mock
-        mock_client_instance = mock_neo_api.return_value
-        cred_details = {
-            'neo_fin_key': 'key',
-            'consumer_key': 'consumer',
-            'mobno': '1234567890',
-            'ucc': 'ucc123',
-            'mpin': '1234'
-        }
-        totp = '123456'
-
-        # Execute
-        client = login_client(totp, cred_details)
-
-        # Verify
-        mock_neo_api.assert_called_with(environment='prod', access_token=None, neo_fin_key='key', consumer_key='consumer')
-        mock_client_instance.totp_login.assert_called_with(mobile_number='1234567890', ucc='ucc123', totp='123456')
-        mock_client_instance.totp_validate.assert_called_with(mpin='1234')
-        self.assertEqual(client, mock_client_instance)
-
-    def test_get_holdings_success(self):
-        # Setup mock client
-        mock_client = MagicMock()
-        mock_client.holdings.return_value = {
-            'data': [
-                {
-                    'symbol': 'TATASTEEL',
-                    'quantity': 10,
-                    'averagePrice': 100.0,
-                    'closingPrice': 105.0
-                },
-                {
-                    'symbol': 'RELIANCE',
-                    'quantity': 5,
-                    'averagePrice': 2000.0,
-                    'closingPrice': 2050.0
-                }
-            ]
-        }
-
-        # Capture stdout
-        captured_output = io.StringIO()
-        sys.stdout = captured_output
-
-        # Execute
-        get_holdings(mock_client)
-
-        # Restore stdout
-        sys.stdout = sys.__stdout__
-
-        # Verify output
-        output = captured_output.getvalue()
-        self.assertIn('TATASTEEL', output)
-        self.assertIn('10', output)
-        self.assertIn('100.00', output)
-        self.assertIn('105.00', output)
-        self.assertIn('RELIANCE', output)
-        self.assertIn('5', output)
-        self.assertIn('2000.00', output)
-        self.assertIn('2050.00', output)
-
-    def test_get_holdings_empty(self):
-        # Setup mock client
-        mock_client = MagicMock()
-        mock_client.holdings.return_value = {'data': []}
-
-        # Capture stdout
-        captured_output = io.StringIO()
-        sys.stdout = captured_output
-
-        # Execute
-        get_holdings(mock_client)
-
-        # Restore stdout
-        sys.stdout = sys.__stdout__
-
-        # Verify output
-        output = captured_output.getvalue()
-        self.assertIn("No holdings found.", output)
-
-    def test_get_holdings_error(self):
-        # Setup mock client
-        mock_client = MagicMock()
-        mock_client.holdings.side_effect = Exception("API Error")
-
-        # Capture stdout
-        captured_output = io.StringIO()
-        sys.stdout = captured_output
-
-        # Execute
-        get_holdings(mock_client)
-
-        # Restore stdout
-        sys.stdout = sys.__stdout__
-
-        # Verify output
-        output = captured_output.getvalue()
-        self.assertIn("Error fetching holdings: API Error", output)
-
-    @patch('main.login_client')
-    def test_book_trade(self, mock_login_client):
-        # Setup mock client
-        mock_client = MagicMock()
-        mock_login_client.return_value = mock_client
-
-        cred_details = {'fake': 'creds'}
-        totp = '123456'
-        trade_details = {
-            'stock_id': 'INFY',
-            'txn_type': 'B',
-            'qty': 10,
-            'tracker_id': 'tracker-1',
-            'order_type': 'L'
-        }
-
-        # Capture stdout
-        captured_output = io.StringIO()
-        sys.stdout = captured_output
-
-        # Execute
-        book_trade(totp, cred_details, trade_details)
-
-        # Restore stdout
-        sys.stdout = sys.__stdout__
-
-        # Verify
-        mock_login_client.assert_called_with(totp, cred_details)
-        mock_client.place_order.assert_called_once()
-        args, kwargs = mock_client.place_order.call_args
-        self.assertEqual(kwargs['trading_symbol'], 'INFY')
-        self.assertEqual(kwargs['transaction_type'], 'B')
-        self.assertEqual(kwargs['quantity'], 10)
-        self.assertIn("Order placed for INFY", captured_output.getvalue())
 
 if __name__ == '__main__':
     unittest.main()

@@ -4,6 +4,7 @@ import csv
 import argparse
 import os
 import getpass
+import sys
 
 
 try:
@@ -69,15 +70,14 @@ def get_holdings(client):
     except Exception as e:
         print(f"Error fetching holdings: {e}")
 
-def book_trade(totp, cred_details, trade_details):
+def book_trade(client, cred_details, trade_details):
     try:
         stock_id = trade_details['stock_id']
         txn_type = trade_details['txn_type']
         qty = trade_details['qty']
         tracker_id = trade_details['tracker_id']
         ord_type = trade_details['order_type']
-        
-        client = login_client(totp, cred_details)
+
 
         client.place_order(
                 exchange_segment="nse_cm",
@@ -104,16 +104,22 @@ def book_trade(totp, cred_details, trade_details):
                 trailing_sl_value=None,
                 )
         print(f"Order placed for {stock_id}")
+        return True
     except Exception as e:
         print(f"Error placing order for {stock_id}: {e}")
+        return False
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Neo Trade Automation")
-    parser.add_argument('--holdings', action='store_true', help="Display current holdings")
-    args = parser.parse_args()
-
     try:
-        require_env_vars(['NEO_FIN_KEY', 'CONSUMER_KEY', 'MOBILE_NO', 'UCC', 'MPIN'])
+        # Parse arguments
+        parser = argparse.ArgumentParser(description='Place orders from CSV using NeoAPI.')
+        parser.add_argument('--csv', default='trades.csv', help='Path to the CSV file containing trades')
+        parser.add_argument('--dry-run', action='store_true', help='Simulate trades without placing orders')
+        parser.add_argument('--holdings', action='store_true', help="Display current holdings")
+        args = parser.parse_args()
+
+        if not args.dry_run:
+            require_env_vars(['NEO_FIN_KEY', 'CONSUMER_KEY', 'MOBILE_NO', 'UCC', 'MPIN'])
         
         cred_details = {
             'neo_fin_key': os.getenv('NEO_FIN_KEY'),
@@ -123,13 +129,29 @@ if __name__ == '__main__':
             'mpin': os.getenv('MPIN')    
         }
         
-        totp = getpass.getpass("Enter TOTP: ")
+        client = None
+        if not args.dry_run:
+            totp = getpass.getpass("Enter TOTP: ")
+            client = login_client(totp, cred_details)
+            if not client:
+                print("Failed to authenticate. Exiting.")
+                sys.exit(1)
+            print("Authentication successful. Processing trades...")
+        else:
+            print("Running in DRY RUN mode. No orders will be placed.")
+            return True
         
         if args.holdings:
-            client = login_client(totp, cred_details)
             get_holdings(client)
         else:
-            stocks = read_stocks_from_csv('trades.csv')
+            success_count = 0
+            fail_count = 0
+            stocks = read_stocks_from_csv(args.csv)
+            if not stocks:
+                print("No stocks to trade or file not found/empty.")
+                sys.exit(0)
+
+
             for stock in stocks:
                 tracker_id = stock['stock_id'] + "-" + datetime.datetime.now().strftime('%Y_%m_%d_%H_%M_%S')
                 trade_details = {
@@ -139,6 +161,12 @@ if __name__ == '__main__':
                     'tracker_id': tracker_id,
                     'order_type': stock['order_type']
                 }
-                book_trade(totp, cred_details, trade_details)
+                if book_trade(client, trade_details, dry_run=args.dry_run):
+                    success_count += 1
+                else:
+                    fail_count += 1
+
+        print(f"\nSummary: {success_count} successful, {fail_count} failed.")
+
     except Exception as e:
         print(f"Unexpected error: {e}")

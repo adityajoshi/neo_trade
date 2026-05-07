@@ -18,11 +18,11 @@ class TestReadStocksFromCSV(unittest.TestCase):
             self.assertEqual(len(stocks), 2)
             self.assertEqual(stocks[0]['stock_id'], 'PAGEIND-EQ')
             self.assertEqual(stocks[0]['txn_type'], 'B')
-            self.assertEqual(stocks[0]['qty'], 1)
+            self.assertEqual(stocks[0]['qty'], '1')
             self.assertEqual(stocks[0]['order_type'], 'MKT')
             self.assertEqual(stocks[1]['stock_id'], 'PGHH-EQ')
             self.assertEqual(stocks[1]['txn_type'], 'S')
-            self.assertEqual(stocks[1]['qty'], 2)
+            self.assertEqual(stocks[1]['qty'], '2')
             self.assertEqual(stocks[1]['order_type'], 'L')
 
     def test_file_not_found(self):
@@ -158,7 +158,8 @@ class TestBookTrade(unittest.TestCase):
         self.cred_details = {'irrelevant': True}
 
     def test_successful_trade(self):
-        result = book_trade(self.client, self.cred_details, self.trade_details)
+        self.client.place_order.return_value = {"stat": "Ok", "nOrdNo": "12345"}
+        result = book_trade(self.client, self.trade_details)
         self.assertTrue(result)
         self.client.place_order.assert_called_once_with(
             exchange_segment="nse_cm",
@@ -187,7 +188,7 @@ class TestBookTrade(unittest.TestCase):
 
     def test_failed_trade(self):
         self.client.place_order.side_effect = Exception("Order failed")
-        result = book_trade(self.client, self.cred_details, self.trade_details)
+        result = book_trade(self.client, self.trade_details)
         self.assertFalse(result)
         self.client.place_order.assert_called_once()
 

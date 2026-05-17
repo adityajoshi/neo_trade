@@ -5,6 +5,7 @@ import argparse
 import os
 import getpass
 import sys
+import ipdb
 
 
 try:
@@ -80,6 +81,7 @@ def get_holdings(client):
                 print(f"{symbol:<15} {qty:<10} {avg_price:<15.2f} {ltp:<15.2f}")
         else:
             print("No holdings found.")
+            print("This is the response from API: {response}.")
     except Exception as e:
         print(f"Error fetching holdings: {e}")
 
@@ -91,6 +93,7 @@ def book_trade(client, trade_details):
         qty = trade_details["qty"]
         tracker_id = trade_details["tracker_id"]
         ord_type = trade_details["order_type"]
+        ipdb.set_trace()
 
         response = client.place_order(
             exchange_segment="nse_cm",

@@ -81,7 +81,7 @@ def get_holdings(client):
                 print(f"{symbol:<15} {qty:<10} {avg_price:<15.2f} {ltp:<15.2f}")
         else:
             print("No holdings found.")
-            print("This is the response from API: {response}.")
+            print(f"This is the response from API: {response}.")
     except Exception as e:
         print(f"Error fetching holdings: {e}")
 

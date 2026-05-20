@@ -8,7 +8,7 @@ A Python project to automate stock trading using the NeoAPI client (Kotak Neo). 
 - **Secure Authentication**: Uses environment variables for credentials and interactive TOTP for login.
 
 ## Prerequisites
-- Python 3.x
+- Python 3.12+ (Tested with 3.12 and 3.14)
 - Kotak Neo API credentials (sign up at Kotak Neo API portal)
 
 ## Installation

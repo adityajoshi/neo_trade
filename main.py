@@ -5,7 +5,6 @@ import argparse
 import os
 import getpass
 import sys
-import ipdb
 
 
 try:
@@ -93,7 +92,6 @@ def book_trade(client, trade_details):
         qty = trade_details["qty"]
         tracker_id = trade_details["tracker_id"]
         ord_type = trade_details["order_type"]
-        ipdb.set_trace()
 
         response = client.place_order(
             exchange_segment="nse_cm",

@@ -39,7 +39,7 @@ A Python project to automate stock trading using the NeoAPI client (Kotak Neo). 
 
 ### 1. Placing Orders (`main.py`)
 
-This script reads trade instructions from `trades.csv`, authenticates, and places orders.
+This script reads trade instructions from `trades.csv`, authenticates, and places orders. Note that this application currently supports only Market (`MKT`) orders and the Cash N Carry (`CNC`) product type.
 
 1. Create a `trades.csv` file in the project root. The format is **semicolon-separated** with the following columns:
    `stock_id;txn_type;quantity;order_type`
@@ -52,7 +52,7 @@ This script reads trade instructions from `trades.csv`, authenticates, and place
    - `stock_id`: Trading symbol (e.g., `PAGEIND-EQ`)
    - `txn_type`: Transaction type (`B` for Buy, `S` for Sell)
    - `quantity`: Number of shares (integer)
-   - `order_type`: Order type (e.g., `MKT`, `L` for Limit)
+   - `order_type`: Order type (must be `MKT` for Market orders)
 
 2. Run the script:
    ```bash

@@ -1,4 +1,5 @@
 from neo_api_client import NeoAPI
+from neo_api_client.exceptions import ApiException
 import datetime
 import csv
 import argparse
@@ -26,7 +27,7 @@ def require_env_vars(names):
 def read_stocks_from_csv(filename):
     """
     Reads a CSV file containing stock trading information.
-    The CSV should have columns: stock_id;buy_or_sell;quantity
+    The CSV should have columns: stock_id;buy_or_sell;quantity;order_type[;price]
     Returns a list of dictionaries with the stock data.
     """
     stocks = []
@@ -34,14 +35,26 @@ def read_stocks_from_csv(filename):
         with open(filename, "r") as file:
             reader = csv.reader(file, delimiter=";")
             for row in reader:
-                if len(row) == 4:
-                    stock_id, txn_type, qty, order_type = row
+                if len(row) == 5:
+                    stock_id, txn_type, qty, order_type, price = [item.strip() for item in row]
                     stocks.append(
                         {
                             "stock_id": stock_id,
                             "txn_type": txn_type,
                             "qty": str(int(qty)),
                             "order_type": order_type,
+                            "price": price if price else "0",
+                        }
+                    )
+                elif len(row) == 4:
+                    stock_id, txn_type, qty, order_type = [item.strip() for item in row]
+                    stocks.append(
+                        {
+                            "stock_id": stock_id,
+                            "txn_type": txn_type,
+                            "qty": str(int(qty)),
+                            "order_type": order_type,
+                            "price": "0",
                         }
                     )
     except FileNotFoundError:
@@ -53,16 +66,20 @@ def read_stocks_from_csv(filename):
 
 def login_client(totp, cred_details):
     client = NeoAPI(
+        consumer_key=cred_details["consumer_key"],
         environment="prod",
         access_token=None,
-        neo_fin_key=cred_details["neo_fin_key"] or None,
-        consumer_key=cred_details["consumer_key"],
+        neo_fin_key=cred_details.get("neo_fin_key") or None,
     )
     if client:
-        client.totp_login(
-            mobile_number=cred_details["mobno"], ucc=cred_details["ucc"], totp=totp
-        )
-        client.totp_validate(mpin=cred_details["mpin"])
+        try:
+            client.totp_login(
+                mobile_number=cred_details["mobno"], ucc=cred_details["ucc"], totp=totp
+            )
+            client.totp_validate(mpin=cred_details["mpin"])
+        except ApiException as e:
+            print(f"Network/API error during login: {e}")
+            return None
     return client
 
 
@@ -92,11 +109,26 @@ def book_trade(client, trade_details):
         qty = trade_details["qty"]
         tracker_id = trade_details["tracker_id"]
         ord_type = trade_details["order_type"]
+        price = str(trade_details.get("price", "0")).strip()
+
+        if ord_type == "L":
+            try:
+                numeric_price = float(price)
+                if numeric_price <= 0:
+                    print(
+                        f"Order rejected for {stock_id}: Limit order requires a positive price, got '{price}'"
+                    )
+                    return False
+            except ValueError:
+                print(
+                    f"Order rejected for {stock_id}: Invalid price '{price}' for Limit order"
+                )
+                return False
 
         response = client.place_order(
             exchange_segment="nse_cm",
             product="CNC",
-            price="0",
+            price=price,
             order_type=ord_type,
             quantity=qty,
             validity="DAY",
@@ -104,18 +136,8 @@ def book_trade(client, trade_details):
             transaction_type=txn_type,
             amo="NO",
             disclosed_quantity="0",
-            market_protection="0",
-            pf="N",
             trigger_price="0",
             tag=tracker_id,
-            scrip_token=None,
-            square_off_type=None,
-            stop_loss_type=None,
-            stop_loss_value=None,
-            square_off_value=None,
-            last_traded_price=None,
-            trailing_stop_loss=None,
-            trailing_sl_value=None,
         )
         print(f"Order response for {stock_id}: {response}")
         # Check if order was accepted
@@ -124,7 +146,16 @@ def book_trade(client, trade_details):
             print(f"Order placed successfully. Order ID: {order_id}")
             return True
         else:
-            error = response.get("error", response) if response else "No response"
+            error = None
+            if isinstance(response, dict):
+                error = (
+                    response.get("Error")
+                    or response.get("error")
+                    or response.get("message")
+                    or response
+                )
+            else:
+                error = response if response else "No response"
             print(f"Order rejected for {stock_id}: {error}")
             return False
     except Exception as e:
@@ -195,6 +226,7 @@ if __name__ == "__main__":
                     "qty": stock["qty"],
                     "tracker_id": tracker_id,
                     "order_type": stock["order_type"],
+                    "price": stock.get("price", "0"),
                 }
                 if book_trade(client, trade_details):
                     success_count += 1

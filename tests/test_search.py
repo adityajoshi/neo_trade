@@ -6,6 +6,20 @@ import os
 # Ensure the parent directory is in the path to import search
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# Provide mock for neo_api_client if not installed in current environment
+try:
+    import neo_api_client
+    from neo_api_client.exceptions import ApiException
+except ImportError:
+    class ApiException(Exception):
+        pass
+
+    neo_mock = MagicMock()
+    neo_exceptions_mock = MagicMock()
+    neo_exceptions_mock.ApiException = ApiException
+    sys.modules["neo_api_client"] = neo_mock
+    sys.modules["neo_api_client.exceptions"] = neo_exceptions_mock
+
 from search import search_for_scrip
 
 class TestSearchForScrip(unittest.TestCase):

@@ -4,14 +4,28 @@ import sys
 import os
 import io
 
-# Ensure the parent directory is in the path to import main
+# Ensure parent directory is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
+
+# Provide mock for neo_api_client if not installed in current environment
+try:
+    import neo_api_client
+    from neo_api_client.exceptions import ApiException
+except ImportError:
+    class ApiException(Exception):
+        pass
+
+    neo_mock = MagicMock()
+    neo_exceptions_mock = MagicMock()
+    neo_exceptions_mock.ApiException = ApiException
+    sys.modules["neo_api_client"] = neo_mock
+    sys.modules["neo_api_client.exceptions"] = neo_exceptions_mock
 
 from main import read_stocks_from_csv, login_client, get_holdings, book_trade
 
 
 class TestReadStocksFromCSV(unittest.TestCase):
-    def test_read_valid_csv(self):
+    def test_read_valid_csv_4_columns(self):
         csv_content = "PAGEIND-EQ;B;1;MKT\nPGHH-EQ;S;2;L"
         with patch("builtins.open", mock_open(read_data=csv_content)):
             stocks = read_stocks_from_csv("trades.csv")
@@ -20,10 +34,28 @@ class TestReadStocksFromCSV(unittest.TestCase):
             self.assertEqual(stocks[0]['txn_type'], 'B')
             self.assertEqual(stocks[0]['qty'], '1')
             self.assertEqual(stocks[0]['order_type'], 'MKT')
+            self.assertEqual(stocks[0]['price'], '0')
             self.assertEqual(stocks[1]['stock_id'], 'PGHH-EQ')
             self.assertEqual(stocks[1]['txn_type'], 'S')
             self.assertEqual(stocks[1]['qty'], '2')
             self.assertEqual(stocks[1]['order_type'], 'L')
+            self.assertEqual(stocks[1]['price'], '0')
+
+    def test_read_valid_csv_5_columns(self):
+        csv_content = "PAGEIND-EQ;B;1;MKT;0\nPGHH-EQ;S;2;L;45000"
+        with patch("builtins.open", mock_open(read_data=csv_content)):
+            stocks = read_stocks_from_csv("trades.csv")
+            self.assertEqual(len(stocks), 2)
+            self.assertEqual(stocks[0]['stock_id'], 'PAGEIND-EQ')
+            self.assertEqual(stocks[0]['txn_type'], 'B')
+            self.assertEqual(stocks[0]['qty'], '1')
+            self.assertEqual(stocks[0]['order_type'], 'MKT')
+            self.assertEqual(stocks[0]['price'], '0')
+            self.assertEqual(stocks[1]['stock_id'], 'PGHH-EQ')
+            self.assertEqual(stocks[1]['txn_type'], 'S')
+            self.assertEqual(stocks[1]['qty'], '2')
+            self.assertEqual(stocks[1]['order_type'], 'L')
+            self.assertEqual(stocks[1]['price'], '45000')
 
     def test_file_not_found(self):
         with patch("builtins.open", side_effect=FileNotFoundError):
@@ -53,10 +85,10 @@ class TestLoginClient(unittest.TestCase):
         client = login_client(totp, cred_details)
 
         MockNeoAPI.assert_called_once_with(
+            consumer_key='ckey',
             environment='prod',
             access_token=None,
-            neo_fin_key='key',
-            consumer_key='ckey'
+            neo_fin_key='key'
         )
         mock_client_instance.totp_login.assert_called_once_with(
             mobile_number='1234567890',
@@ -65,6 +97,20 @@ class TestLoginClient(unittest.TestCase):
         )
         mock_client_instance.totp_validate.assert_called_once_with(mpin='1234')
         self.assertEqual(client, mock_client_instance)
+
+    @patch('main.NeoAPI')
+    def test_login_api_exception(self, MockNeoAPI):
+        mock_client_instance = MockNeoAPI.return_value
+        mock_client_instance.totp_login.side_effect = ApiException("Network failure")
+        cred_details = {
+            'neo_fin_key': 'key',
+            'consumer_key': 'ckey',
+            'mobno': '1234567890',
+            'ucc': 'ucc123',
+            'mpin': '1234'
+        }
+        client = login_client('123456', cred_details)
+        self.assertIsNone(client)
 
     @patch('main.NeoAPI')
     def test_init_exception(self, MockNeoAPI):
@@ -147,19 +193,26 @@ class TestGetHoldings(unittest.TestCase):
 class TestBookTrade(unittest.TestCase):
     def setUp(self):
         self.client = MagicMock()
-        self.trade_details = {
+        self.mkt_trade_details = {
             'stock_id': 'STOCK1',
             'txn_type': 'B',
             'qty': 10,
             'tracker_id': 'tracker1',
-            'order_type': 'MKT'
+            'order_type': 'MKT',
+            'price': '0',
         }
-        # dummy cred details, not actually used by current implementation
-        self.cred_details = {'irrelevant': True}
+        self.limit_trade_details = {
+            'stock_id': 'STOCK2',
+            'txn_type': 'S',
+            'qty': 5,
+            'tracker_id': 'tracker2',
+            'order_type': 'L',
+            'price': '1500.50',
+        }
 
-    def test_successful_trade(self):
+    def test_successful_mkt_trade(self):
         self.client.place_order.return_value = {"stat": "Ok", "nOrdNo": "12345"}
-        result = book_trade(self.client, self.trade_details)
+        result = book_trade(self.client, self.mkt_trade_details)
         self.assertTrue(result)
         self.client.place_order.assert_called_once_with(
             exchange_segment="nse_cm",
@@ -172,23 +225,76 @@ class TestBookTrade(unittest.TestCase):
             transaction_type="B",
             amo="NO",
             disclosed_quantity="0",
-            market_protection="0",
-            pf="N",
             trigger_price="0",
             tag="tracker1",
-            scrip_token=None,
-            square_off_type=None,
-            stop_loss_type=None,
-            stop_loss_value=None,
-            square_off_value=None,
-            last_traded_price=None,
-            trailing_stop_loss=None,
-            trailing_sl_value=None,
         )
 
-    def test_failed_trade(self):
+    def test_successful_limit_trade(self):
+        self.client.place_order.return_value = {"stat": "Ok", "nOrdNo": "67890"}
+        result = book_trade(self.client, self.limit_trade_details)
+        self.assertTrue(result)
+        self.client.place_order.assert_called_once_with(
+            exchange_segment="nse_cm",
+            product="CNC",
+            price="1500.50",
+            order_type="L",
+            quantity=5,
+            validity="DAY",
+            trading_symbol="STOCK2",
+            transaction_type="S",
+            amo="NO",
+            disclosed_quantity="0",
+            trigger_price="0",
+            tag="tracker2",
+        )
+
+    def test_limit_trade_zero_price_rejected(self):
+        bad_trade = {
+            'stock_id': 'STOCK3',
+            'txn_type': 'B',
+            'qty': 10,
+            'tracker_id': 'tracker3',
+            'order_type': 'L',
+            'price': '0',
+        }
+        result = book_trade(self.client, bad_trade)
+        self.assertFalse(result)
+        self.client.place_order.assert_not_called()
+
+    def test_limit_trade_negative_price_rejected(self):
+        bad_trade = {
+            'stock_id': 'STOCK3',
+            'txn_type': 'B',
+            'qty': 10,
+            'tracker_id': 'tracker3',
+            'order_type': 'L',
+            'price': '-50',
+        }
+        result = book_trade(self.client, bad_trade)
+        self.assertFalse(result)
+        self.client.place_order.assert_not_called()
+
+    def test_limit_trade_invalid_price_rejected(self):
+        bad_trade = {
+            'stock_id': 'STOCK3',
+            'txn_type': 'B',
+            'qty': 10,
+            'tracker_id': 'tracker3',
+            'order_type': 'L',
+            'price': 'invalid',
+        }
+        result = book_trade(self.client, bad_trade)
+        self.assertFalse(result)
+        self.client.place_order.assert_not_called()
+
+    def test_failed_trade_v3_error_dict(self):
+        self.client.place_order.return_value = {"Error": "Invalid order type"}
+        result = book_trade(self.client, self.mkt_trade_details)
+        self.assertFalse(result)
+
+    def test_failed_trade_exception(self):
         self.client.place_order.side_effect = Exception("Order failed")
-        result = book_trade(self.client, self.trade_details)
+        result = book_trade(self.client, self.mkt_trade_details)
         self.assertFalse(result)
         self.client.place_order.assert_called_once()
 

@@ -4,7 +4,8 @@ A Python project to automate stock trading using the NeoAPI client (Kotak Neo). 
 
 ## Features
 - **Automated Trading**: Reads trade instructions from a CSV file and places orders.
-- **Scrip Search**: Utility to search for stock symbols and get details.
+- **Scrip Search**: Utility to search for stock symbols and get details via NeoAPI.
+- **Scrip Master Integration**: Downloads instrument master CSV files directly from Kotak Neo Scrip Master API, with caching, optional segment filtering, symbol/token search, and IST expiry date conversion.
 - **Secure Authentication**: Uses environment variables for credentials and interactive TOTP for login.
 
 ## Prerequisites
@@ -80,10 +81,84 @@ python search.py --symbol RELIANCE
 
 This will output the scrip details returned by the API.
 
+### 3. Scrip Master & Instrument Files (`scrip_master.py`)
+
+This utility integrates with Kotak Neo's **Scrip Master API** to fetch CSV download paths, download scrip master files across exchange segments, and perform fast offline searches with parsed expiry dates.
+
+#### A. List Available Master CSV URLs
+```bash
+python scrip_master.py --list-urls
+```
+
+#### B. Download Master CSV Files
+Download all available exchange segments:
+```bash
+python scrip_master.py --download
+```
+
+Download specific segment(s) (`--segment` is optional, e.g. `nse_cm`, `nse_fo`, `bse_cm`):
+```bash
+python scrip_master.py --download --segment nse_cm
+python scrip_master.py --download --segment nse_cm,nse_fo
+```
+
+Custom output folder (defaults to `scrip_master_data/`):
+```bash
+python scrip_master.py --download --output-dir my_data
+```
+
+#### C. Search Cached Scrips
+Search for a symbol across all downloaded segments:
+```bash
+python scrip_master.py --search RELIANCE
+```
+
+Search within a specific segment:
+```bash
+python scrip_master.py --search RELIANCE --segment nse_fo
+```
+
+Search by exact instrument token:
+```bash
+python scrip_master.py --search 11536 --search-by token
+```
+
+#### D. Python Library Usage
+```python
+from neo_api_client import NeoAPI
+from scrip_master import ScripMasterClient, login_client
+
+# 1. Authenticate with NeoAPI
+cred_details = {
+    "consumer_key": "your_consumer_key",
+    "mobno": "your_mobile_number",
+    "ucc": "your_ucc",
+    "mpin": "your_mpin",
+    "neo_fin_key": "your_neo_fin_key",
+}
+neo_client = login_client(totp="123456", cred_details=cred_details)
+
+# 2. Use ScripMasterClient with authenticated client
+client = ScripMasterClient(client=neo_client)
+
+# List file paths
+data = client.get_master_file_paths()
+
+# Download all segments (or specify segments=['nse_cm'])
+downloaded = client.download_segments()
+
+# Search across cached files (no auth required if files already downloaded)
+search_client = ScripMasterClient()
+results = search_client.search_scrip("RELIANCE")
+for r in results:
+    print(r["pTrdSymbol"], r["pExchSeg"], r["formattedExpiryDate"])
+```
+
 ## File Structure
 
 - `main.py`: Main script for placing orders from CSV.
-- `search.py`: Utility script for searching scrip details.
+- `search.py`: Utility script for searching scrip details via NeoAPI.
+- `scrip_master.py`: Tool for downloading and querying Scrip Master CSV files.
 - `trades.csv`: Input file for trade instructions (user-created).
 - `requirements.txt`: Python dependencies.
 - `sample.env`: Template for environment variables.

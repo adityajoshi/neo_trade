@@ -78,7 +78,7 @@ RETENTION_INCEPTION_DATE = date(2021, 1, 1)
 SUPPORTED_SEGMENTS = ["nse_cm", "nse_fo", "bse_cm", "bse_fo"]
 DEFAULT_OUTPUT_DIR = "historical_data_output"
 DEFAULT_SCRIP_DIR = "scrip_master_data"
-DEFAULT_BASE_URL = "https://napi.kotaksecurities.com"
+DEFAULT_BASE_URL: Optional[str] = None
 
 
 def require_env_vars(names: List[str]) -> None:
@@ -95,6 +95,7 @@ def require_env_vars(names: List[str]) -> None:
 def login_client(totp: str, cred_details: Dict[str, Any]) -> Optional[Any]:
     """
     Authenticates with Kotak Neo using NeoAPI via TOTP and MPIN validation.
+    Extracts and assigns the dynamic baseUrl returned by /tradeApiValidate.
     """
     if NeoAPI is None:
         raise RuntimeError("neo_api_client module is not installed.")
@@ -110,7 +111,30 @@ def login_client(totp: str, cred_details: Dict[str, Any]) -> Optional[Any]:
             client.totp_login(
                 mobile_number=cred_details["mobno"], ucc=cred_details["ucc"], totp=totp
             )
-            client.totp_validate(mpin=cred_details["mpin"])
+            validate_res = client.totp_validate(mpin=cred_details["mpin"])
+
+            # Derive baseUrl from validation response (Step 3 /tradeApiValidate)
+            base_url = None
+            if isinstance(validate_res, dict):
+                data = validate_res.get("data")
+                if isinstance(data, dict):
+                    base_url = data.get("baseUrl")
+                if not base_url:
+                    base_url = validate_res.get("baseUrl")
+
+            # Fallback to checking client attributes or configuration if not in dict
+            if not base_url:
+                base_url = getattr(client, "base_url", None)
+            if not base_url and hasattr(client, "configuration"):
+                cfg = client.configuration
+                base_url = getattr(cfg, "base_url", None) or getattr(cfg, "host", None)
+
+            if base_url:
+                base_url = str(base_url).rstrip("/")
+                client.base_url = base_url
+                _LOGGER.info("Authenticated successfully. Derived base URL: %s", base_url)
+            else:
+                _LOGGER.info("Authenticated successfully with NeoAPI.")
         except ApiException as e:
             _LOGGER.error("Network/API error during login: %s", e)
             return None
@@ -301,8 +325,15 @@ class HistoricalDataClient:
         consumer_key: Optional[str] = None,
     ):
         self.client = client
-        raw_base_url = base_url or os.getenv("NEO_BASE_URL") or DEFAULT_BASE_URL
-        self.base_url = raw_base_url.rstrip("/")
+        derived_base_url = None
+        if client:
+            derived_base_url = getattr(client, "base_url", None) or getattr(client, "derived_base_url", None)
+            if not derived_base_url and hasattr(client, "configuration"):
+                cfg = client.configuration
+                derived_base_url = getattr(cfg, "base_url", None) or getattr(cfg, "host", None)
+
+        raw_base_url = base_url or derived_base_url or os.getenv("NEO_BASE_URL") or DEFAULT_BASE_URL
+        self.base_url = str(raw_base_url).rstrip("/") if raw_base_url else None
         self.max_workers = max_workers
         self.consumer_key = consumer_key or os.getenv("CONSUMER_KEY")
 
@@ -343,7 +374,14 @@ class HistoricalDataClient:
                 )
                 return self._parse_candles(res)
             except Exception as e:
-                _LOGGER.debug("SDK historical_data method raised %s, attempting REST call", e)
+                _LOGGER.warning("SDK historical_data method raised %s, attempting REST call fallback", e)
+
+        if not self.base_url:
+            raise RuntimeError(
+                f"Failed to fetch historical data for chunk {from_date} to {to_date}: "
+                "Base URL is not available. Ensure authentication succeeded and returned a valid baseUrl, "
+                "or provide a valid base_url."
+            )
 
         endpoint = f"{self.base_url}/market-data/1.0/historical/details"
         params = {
@@ -504,6 +542,11 @@ def main() -> None:
         default=5,
         help="Maximum concurrent workers for simultaneous requests (default: 5)",
     )
+    parser.add_argument(
+        "--base-url",
+        default=None,
+        help="Optional base URL override (by default dynamically derived from login validation)",
+    )
 
     args = parser.parse_args()
 
@@ -558,6 +601,7 @@ def main() -> None:
     # Step 4: Simultaneous chunk fetching
     client = HistoricalDataClient(
         client=neo_client,
+        base_url=args.base_url,
         max_workers=args.max_workers,
         consumer_key=cred_details["consumer_key"],
     )

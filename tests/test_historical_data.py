@@ -167,7 +167,19 @@ class TestSymbolResolution(unittest.TestCase):
 
 class TestHistoricalDataClient(unittest.TestCase):
     def setUp(self):
-        self.client = HistoricalDataClient(consumer_key="test-key")
+        self.client = HistoricalDataClient(consumer_key="test-key", base_url="https://cis.kotaksecurities.com")
+
+    def test_missing_base_url_raises_error(self):
+        client_no_url = HistoricalDataClient(consumer_key="test-key")
+        with self.assertRaises(RuntimeError) as ctx:
+            client_no_url.fetch_chunk("nse_cm|383", "2025-01-01", "2025-01-10", "15min")
+        self.assertIn("Base URL is not available", str(ctx.exception))
+
+    def test_client_inherits_derived_base_url(self):
+        mock_neo_client = MagicMock()
+        mock_neo_client.base_url = "https://cluster.kotaksecurities.com"
+        client = HistoricalDataClient(client=mock_neo_client)
+        self.assertEqual(client.base_url, "https://cluster.kotaksecurities.com")
 
     @patch("requests.get")
     def test_fetch_chunk_success(self, mock_get):
@@ -330,6 +342,29 @@ class TestHistoricalDataCLI(unittest.TestCase):
         generated_csvs = list(out_dir.glob("*.csv"))
         self.assertEqual(len(generated_csvs), 1)
         self.assertIn("BEL_nse_cm_15min", generated_csvs[0].name)
+
+
+class TestHistoricalDataLogin(unittest.TestCase):
+    @patch("historical_data.NeoAPI")
+    def test_login_client_derives_base_url_from_validation(self, MockNeoAPI):
+        mock_client = MockNeoAPI.return_value
+        mock_client.totp_validate.return_value = {
+            "data": {
+                "token": "trade_token",
+                "sid": "session_sid",
+                "baseUrl": "https://cis.kotaksecurities.com",
+            }
+        }
+        cred_details = {
+            "consumer_key": "ckey",
+            "mobno": "9999999999",
+            "ucc": "ucc123",
+            "mpin": "1234",
+            "neo_fin_key": "fin_key",
+        }
+        client = login_client("123456", cred_details)
+        self.assertIsNotNone(client)
+        self.assertEqual(client.base_url, "https://cis.kotaksecurities.com")
 
 
 if __name__ == "__main__":

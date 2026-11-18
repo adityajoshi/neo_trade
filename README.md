@@ -154,11 +154,45 @@ for r in results:
     print(r["pTrdSymbol"], r["pExchSeg"], r["formattedExpiryDate"])
 ```
 
+### 4. Historical Candle Data (`historical_data.py`)
+
+This tool downloads historical OHLCV candlestick data across arbitrary date ranges, automatically chunking requests according to interval constraints, validating against rate-limit safety rules, resolving symbols (such as `BEL`, `NIFTY`, `RELIANCE`) from local scrip master files, and executing concurrent calls under a single 2FA authentication session.
+
+#### A. Basic Usage
+Fetch 15-minute historical candles for a stock:
+```bash
+python historical_data.py --symbol BEL --from-date 2025-01-01 --to-date 2025-03-31 --interval 15min
+```
+
+Fetch daily candles for an index:
+```bash
+python historical_data.py --symbol NIFTY --from-date 2024-01-01 --to-date 2024-12-31 --interval D
+```
+
+Specify a custom output path or directory:
+```bash
+python historical_data.py --symbol BEL --from-date 2025-01-01 --to-date 2025-02-15 --interval 5min --output-dir historical_data_output
+```
+
+#### B. Interval Limits & Predefined Safety Rules
+The API imposes single-request date limits per interval. The script automatically divides requests into non-overlapping chunks:
+* `1min`, `3min`, `5min`: Max **30 days** per chunk (Max total span: 180 days)
+* `10min`, `15min`: Max **60 days** per chunk (Max total span: 365 days)
+* `30min`, `60min`: Max **90 days** per chunk (Max total span: 730 days)
+* `D` (Daily), `W` (Weekly): Max **180 days** per chunk (Max total span: 1825 days / 5 years)
+
+**Safety Pre-Checks:**
+* Rejects requests exceeding **15 chunks** before contacting the API to avoid `HTTP 429 Too Many Requests`.
+* Rejects dates prior to Kotak's retention inception date (`2021-01-01`) or future dates.
+* Prompts for TOTP **once** at startup; all chunks are fetched concurrently using a worker pool (`max_workers=5`).
+* Automatically deduplicates timestamps and exports sorted candles to CSV in `historical_data_output/`.
+
 ## File Structure
 
 - `main.py`: Main script for placing orders from CSV.
 - `search.py`: Utility script for searching scrip details via NeoAPI.
 - `scrip_master.py`: Tool for downloading and querying Scrip Master CSV files.
+- `historical_data.py`: Tool for fetching, chunking, and exporting historical OHLCV data.
 - `trades.csv`: Input file for trade instructions (user-created).
 - `requirements.txt`: Python dependencies.
 - `sample.env`: Template for environment variables.

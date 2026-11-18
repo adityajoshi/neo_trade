@@ -14,11 +14,21 @@ import sys
 import csv
 import logging
 import argparse
+import getpass
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional, Union, Any
 
 import requests
+
+try:
+    from neo_api_client import NeoAPI
+    from neo_api_client.exceptions import ApiException
+except ImportError:
+    NeoAPI = None  # type: ignore
+
+    class ApiException(Exception):  # type: ignore
+        pass
 
 try:
     from dotenv import load_dotenv
@@ -35,10 +45,45 @@ if not logging.getLogger().handlers:
 
 IST_TIMEZONE = timezone(timedelta(hours=5, minutes=30))
 NSE_CDE_EPOCH_OFFSET = 315511200  # Offset documented in Scrip Master API for nse_fo and cde_fo
-DEFAULT_BASE_URL = "https://napi.kotaksecurities.com"
 DEFAULT_CACHE_DIR = "scrip_master_data"
 
 KNOWN_SEGMENTS = ["nse_cm", "bse_cm", "nse_fo", "bse_fo", "cde_fo", "mcx_fo", "nse_com"]
+
+
+def require_env_vars(names: List[str]) -> None:
+    """
+    Validates that the specified environment variables are set.
+    """
+    missing = [n for n in names if not os.getenv(n)]
+    if missing:
+        raise RuntimeError(
+            f"Missing required environment variables: {', '.join(missing)}"
+        )
+
+
+def login_client(totp: str, cred_details: Dict[str, Any]) -> Optional[Any]:
+    """
+    Authenticates with Kotak Neo using NeoAPI via TOTP and MPIN validation.
+    """
+    if NeoAPI is None:
+        raise RuntimeError("neo_api_client module is not installed.")
+
+    client = NeoAPI(
+        consumer_key=cred_details["consumer_key"],
+        environment="prod",
+        access_token=None,
+        neo_fin_key=cred_details.get("neo_fin_key") or None,
+    )
+    if client:
+        try:
+            client.totp_login(
+                mobile_number=cred_details["mobno"], ucc=cred_details["ucc"], totp=totp
+            )
+            client.totp_validate(mpin=cred_details["mpin"])
+        except ApiException as e:
+            _LOGGER.error("Network/API error during login: %s", e)
+            return None
+    return client
 
 
 def parse_expiry_date(epoch_val: Union[int, float, str, None], segment: Optional[str] = None) -> Optional[str]:
@@ -93,55 +138,37 @@ class ScripMasterClient:
 
     def __init__(
         self,
-        api_token: Optional[str] = None,
-        base_url: Optional[str] = None,
+        client: Optional[Any] = None,
         cache_dir: Union[str, Path] = DEFAULT_CACHE_DIR,
     ):
-        self.api_token = api_token or os.getenv("NEO_API_TOKEN") or os.getenv("NEO_TOKEN")
-        raw_base_url = base_url or os.getenv("NEO_BASE_URL") or DEFAULT_BASE_URL
-        self.base_url = raw_base_url.rstrip("/")
+        self.client = client
         self.cache_dir = Path(cache_dir)
 
     def get_master_file_paths(self) -> Dict[str, Any]:
         """
-        Calls GET <Base URL>/script-details/1.0/masterscrip/file-paths.
+        Calls NeoAPI client.scrip_master() to retrieve file paths.
         Returns the data dictionary containing 'filesPaths' and 'baseFolder'.
         """
-        if not self.api_token:
+        if not self.client:
             raise RuntimeError(
-                "Missing API token. Provide it via NEO_API_TOKEN env var or --token argument."
+                "Authentication required: NeoAPI client is not authenticated."
             )
 
-        endpoint = f"{self.base_url}/script-details/1.0/masterscrip/file-paths"
-        headers = {
-            "Authorization": self.api_token,
-            "Accept": "application/json",
-        }
-
-        _LOGGER.info("Fetching scrip master file paths from %s", endpoint)
+        _LOGGER.info("Fetching scrip master file paths via NeoAPI")
         try:
-            response = requests.get(endpoint, headers=headers, timeout=30)
-        except requests.RequestException as e:
-            raise RuntimeError(f"Network error while connecting to Scrip Master API: {e}") from e
-
-        if response.status_code == 401:
-            raise RuntimeError("Unauthorized: Invalid or missing API token (HTTP 401)")
-        elif response.status_code == 403:
-            raise RuntimeError("Forbidden: Not enough privileges (HTTP 403)")
-        elif response.status_code == 429:
-            raise RuntimeError("Too many requests: API rate limited (HTTP 429)")
-        elif response.status_code >= 500:
-            raise RuntimeError(f"Server error from Scrip Master API (HTTP {response.status_code})")
-
-        try:
-            response.raise_for_status()
-            res_json = response.json()
+            res = self.client.scrip_master()
         except Exception as e:
-            raise RuntimeError(f"Failed to parse Scrip Master API response: {e}") from e
+            raise RuntimeError(f"Failed to fetch scrip master file paths: {e}") from e
 
-        data = res_json.get("data", {})
+        if isinstance(res, dict) and "data" in res and isinstance(res["data"], dict):
+            data = res["data"]
+        elif isinstance(res, dict):
+            data = res
+        else:
+            raise RuntimeError(f"Unexpected response format from scrip_master: {res}")
+
         if not data or "filesPaths" not in data:
-            raise RuntimeError(f"Unexpected response format: 'data.filesPaths' missing: {res_json}")
+            raise RuntimeError(f"Unexpected response format: 'filesPaths' missing: {res}")
 
         return data
 
@@ -314,52 +341,11 @@ def main() -> None:
         default=DEFAULT_CACHE_DIR,
         help=f"Directory to save/read CSV master files (default: {DEFAULT_CACHE_DIR})",
     )
-    parser.add_argument(
-        "--token",
-        default=None,
-        help="Kotak Neo API token (defaults to NEO_API_TOKEN env var)",
-    )
-    parser.add_argument(
-        "--base-url",
-        default=None,
-        help=f"Kotak Neo Base URL (defaults to NEO_BASE_URL env var or {DEFAULT_BASE_URL})",
-    )
 
     args = parser.parse_args()
 
-    client = ScripMasterClient(
-        api_token=args.token,
-        base_url=args.base_url,
-        cache_dir=args.output_dir,
-    )
-
-    if args.list_urls:
-        try:
-            data = client.get_master_file_paths()
-            print("Base Folder:", data.get("baseFolder", "N/A"))
-            print("Files Paths:")
-            for url in data.get("filesPaths", []):
-                seg = extract_segment_from_url(url)
-                print(f"  - [{seg}] {url}")
-        except Exception as e:
-            print(f"Error listing file paths: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.download:
-        try:
-            print(f"Downloading master CSV files to '{args.output_dir}'...")
-            downloaded = client.download_segments(segments=args.segment, output_dir=args.output_dir)
-            if downloaded:
-                print(f"Successfully downloaded {len(downloaded)} segment file(s):")
-                for seg, path in downloaded.items():
-                    print(f"  - {seg}: {path}")
-            else:
-                print("No files were downloaded. Verify segments or API response.")
-        except Exception as e:
-            print(f"Error downloading files: {e}", file=sys.stderr)
-            sys.exit(1)
-
-    elif args.search:
+    if args.search:
+        client = ScripMasterClient(cache_dir=args.output_dir)
         results = client.search_scrip(
             query=args.search,
             segment=args.segment,
@@ -380,6 +366,51 @@ def main() -> None:
                 p_lot = item.get("lLotSize", "")
                 expiry = item.get("formattedExpiryDate") or "N/A"
                 print(f"{p_sym:<18} {p_seg:<14} {p_trd:<24} {p_lot:<14} {expiry:<24}")
+
+    elif args.list_urls or args.download:
+        require_env_vars(["CONSUMER_KEY", "MOBILE_NO", "UCC", "MPIN"])
+
+        cred_details = {
+            "neo_fin_key": os.getenv("NEO_FIN_KEY"),
+            "consumer_key": os.getenv("CONSUMER_KEY"),
+            "ucc": os.getenv("UCC"),
+            "mobno": os.getenv("MOBILE_NO"),
+            "mpin": os.getenv("MPIN"),
+        }
+
+        totp = getpass.getpass("Enter TOTP: ")
+        neo_client = login_client(totp, cred_details)
+        if not neo_client:
+            print("Failed to authenticate. Exiting.", file=sys.stderr)
+            sys.exit(1)
+
+        client = ScripMasterClient(client=neo_client, cache_dir=args.output_dir)
+
+        if args.list_urls:
+            try:
+                data = client.get_master_file_paths()
+                print("Base Folder:", data.get("baseFolder", "N/A"))
+                print("Files Paths:")
+                for url in data.get("filesPaths", []):
+                    seg = extract_segment_from_url(url)
+                    print(f"  - [{seg}] {url}")
+            except Exception as e:
+                print(f"Error listing file paths: {e}", file=sys.stderr)
+                sys.exit(1)
+
+        elif args.download:
+            try:
+                print(f"Downloading master CSV files to '{args.output_dir}'...")
+                downloaded = client.download_segments(segments=args.segment, output_dir=args.output_dir)
+                if downloaded:
+                    print(f"Successfully downloaded {len(downloaded)} segment file(s):")
+                    for seg, path in downloaded.items():
+                        print(f"  - {seg}: {path}")
+                else:
+                    print("No files were downloaded. Verify segments or API response.")
+            except Exception as e:
+                print(f"Error downloading files: {e}", file=sys.stderr)
+                sys.exit(1)
 
     else:
         parser.print_help()

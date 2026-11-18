@@ -34,10 +34,6 @@ A Python project to automate stock trading using the NeoAPI client (Kotak Neo). 
    MOBILE_NO=your_mobile_number
    UCC=your_ucc
    MPIN=your_mpin
-
-   # Optional: For Scrip Master API (scrip_master.py)
-   NEO_API_TOKEN=your_neo_api_token
-   NEO_BASE_URL=https://napi.kotaksecurities.com
    ```
 
 ## Usage
@@ -129,9 +125,21 @@ python scrip_master.py --search 11536 --search-by token
 
 #### D. Python Library Usage
 ```python
-from scrip_master import ScripMasterClient
+from neo_api_client import NeoAPI
+from scrip_master import ScripMasterClient, login_client
 
-client = ScripMasterClient()
+# 1. Authenticate with NeoAPI
+cred_details = {
+    "consumer_key": "your_consumer_key",
+    "mobno": "your_mobile_number",
+    "ucc": "your_ucc",
+    "mpin": "your_mpin",
+    "neo_fin_key": "your_neo_fin_key",
+}
+neo_client = login_client(totp="123456", cred_details=cred_details)
+
+# 2. Use ScripMasterClient with authenticated client
+client = ScripMasterClient(client=neo_client)
 
 # List file paths
 data = client.get_master_file_paths()
@@ -139,8 +147,9 @@ data = client.get_master_file_paths()
 # Download all segments (or specify segments=['nse_cm'])
 downloaded = client.download_segments()
 
-# Search across cached files
-results = client.search_scrip("RELIANCE")
+# Search across cached files (no auth required if files already downloaded)
+search_client = ScripMasterClient()
+results = search_client.search_scrip("RELIANCE")
 for r in results:
     print(r["pTrdSymbol"], r["pExchSeg"], r["formattedExpiryDate"])
 ```

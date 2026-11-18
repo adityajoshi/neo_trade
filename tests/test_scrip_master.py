@@ -1,5 +1,5 @@
 import unittest
-from unittest.mock import patch, MagicMock, mock_open
+from unittest.mock import patch, MagicMock
 import sys
 import os
 import io
@@ -11,13 +11,28 @@ from datetime import datetime, timezone, timedelta
 # Ensure parent directory is in path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# Provide mock for neo_api_client if not installed in current environment
+try:
+    import neo_api_client
+    from neo_api_client.exceptions import ApiException
+except ImportError:
+    class ApiException(Exception):
+        pass
+
+    neo_mock = MagicMock()
+    neo_exceptions_mock = MagicMock()
+    neo_exceptions_mock.ApiException = ApiException
+    sys.modules["neo_api_client"] = neo_mock
+    sys.modules["neo_api_client.exceptions"] = neo_exceptions_mock
+
 from scrip_master import (
     ScripMasterClient,
+    require_env_vars,
+    login_client,
     parse_expiry_date,
     extract_segment_from_url,
     IST_TIMEZONE,
     NSE_CDE_EPOCH_OFFSET,
-    DEFAULT_BASE_URL,
     main as cli_main,
 )
 
@@ -63,65 +78,110 @@ class TestScripMasterUtils(unittest.TestCase):
         self.assertIsNone(parse_expiry_date(-100, "nse_fo"))
 
 
+class TestRequireEnvVars(unittest.TestCase):
+    def test_missing_env_vars_raises_error(self):
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaises(RuntimeError) as ctx:
+                require_env_vars(["CONSUMER_KEY", "MOBILE_NO"])
+            self.assertIn("Missing required environment variables", str(ctx.exception))
+
+    def test_all_env_vars_present(self):
+        with patch.dict(os.environ, {"A": "1", "B": "2"}):
+            require_env_vars(["A", "B"])
+
+
+class TestLoginClient(unittest.TestCase):
+    @patch("scrip_master.NeoAPI")
+    def test_successful_login(self, MockNeoAPI):
+        mock_client = MockNeoAPI.return_value
+        cred_details = {
+            "neo_fin_key": "fin_key",
+            "consumer_key": "ckey",
+            "mobno": "9999999999",
+            "ucc": "ucc123",
+            "mpin": "1234",
+        }
+        client = login_client("654321", cred_details)
+        MockNeoAPI.assert_called_once_with(
+            consumer_key="ckey",
+            environment="prod",
+            access_token=None,
+            neo_fin_key="fin_key",
+        )
+        mock_client.totp_login.assert_called_once_with(
+            mobile_number="9999999999", ucc="ucc123", totp="654321"
+        )
+        mock_client.totp_validate.assert_called_once_with(mpin="1234")
+        self.assertEqual(client, mock_client)
+
+    @patch("scrip_master.NeoAPI")
+    def test_login_api_exception(self, MockNeoAPI):
+        mock_client = MockNeoAPI.return_value
+        mock_client.totp_login.side_effect = ApiException("Login failed")
+        cred_details = {
+            "consumer_key": "ckey",
+            "mobno": "9999999999",
+            "ucc": "ucc123",
+            "mpin": "1234",
+        }
+        client = login_client("654321", cred_details)
+        self.assertIsNone(client)
+
+
 class TestScripMasterClient(unittest.TestCase):
     def setUp(self):
         self.test_dir = tempfile.mkdtemp()
+        self.mock_neo_client = MagicMock()
         self.client = ScripMasterClient(
-            api_token="test-token-123",
-            base_url="https://api.testkotak.com",
+            client=self.mock_neo_client,
             cache_dir=self.test_dir,
         )
 
     def tearDown(self):
         shutil.rmtree(self.test_dir, ignore_errors=True)
 
-    def test_missing_token_raises_error(self):
-        with patch.dict(os.environ, {}, clear=True):
-            client = ScripMasterClient(api_token=None)
-            with self.assertRaises(RuntimeError) as ctx:
-                client.get_master_file_paths()
-            self.assertIn("Missing API token", str(ctx.exception))
+    def test_missing_client_raises_error(self):
+        client = ScripMasterClient(client=None)
+        with self.assertRaises(RuntimeError) as ctx:
+            client.get_master_file_paths()
+        self.assertIn("Authentication required", str(ctx.exception))
 
-    @patch("requests.get")
-    def test_get_master_file_paths_success(self, mock_get):
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.json.return_value = {
+    def test_get_master_file_paths_success_with_filespaths(self):
+        self.mock_neo_client.scrip_master.return_value = {
+            "filesPaths": [
+                "https://lapi.kotaksecurities.com/v1/transformed-v1/nse_cm-v1.csv",
+                "https://lapi.kotaksecurities.com/v1/transformed/nse_fo.csv",
+            ],
+            "baseFolder": "https://lapi.kotaksecurities.com/v1",
+        }
+        data = self.client.get_master_file_paths()
+        self.mock_neo_client.scrip_master.assert_called_once()
+        self.assertEqual(len(data["filesPaths"]), 2)
+        self.assertEqual(data["baseFolder"], "https://lapi.kotaksecurities.com/v1")
+
+    def test_get_master_file_paths_success_nested_data(self):
+        self.mock_neo_client.scrip_master.return_value = {
             "data": {
                 "filesPaths": [
                     "https://lapi.kotaksecurities.com/v1/transformed-v1/nse_cm-v1.csv",
-                    "https://lapi.kotaksecurities.com/v1/transformed/nse_fo.csv",
                 ],
                 "baseFolder": "https://lapi.kotaksecurities.com/v1",
             }
         }
-        mock_get.return_value = mock_response
-
         data = self.client.get_master_file_paths()
+        self.assertEqual(len(data["filesPaths"]), 1)
 
-        mock_get.assert_called_once_with(
-            "https://api.testkotak.com/script-details/1.0/masterscrip/file-paths",
-            headers={"Authorization": "test-token-123", "Accept": "application/json"},
-            timeout=30,
-        )
-        self.assertEqual(len(data["filesPaths"]), 2)
-        self.assertEqual(data["baseFolder"], "https://lapi.kotaksecurities.com/v1")
+    def test_get_master_file_paths_exception(self):
+        self.mock_neo_client.scrip_master.side_effect = Exception("Network timeout")
+        with self.assertRaises(RuntimeError) as ctx:
+            self.client.get_master_file_paths()
+        self.assertIn("Failed to fetch scrip master file paths", str(ctx.exception))
 
-    @patch("requests.get")
-    def test_get_master_file_paths_http_errors(self, mock_get):
-        error_cases = [
-            (401, "Unauthorized"),
-            (403, "Forbidden"),
-            (429, "Too many requests"),
-            (500, "Server error"),
-        ]
-        for status_code, expected_msg in error_cases:
-            mock_resp = MagicMock()
-            mock_resp.status_code = status_code
-            mock_get.return_value = mock_resp
-            with self.assertRaises(RuntimeError) as ctx:
-                self.client.get_master_file_paths()
-            self.assertIn(expected_msg, str(ctx.exception))
+    def test_get_master_file_paths_unexpected_format(self):
+        self.mock_neo_client.scrip_master.return_value = {"status": "error"}
+        with self.assertRaises(RuntimeError) as ctx:
+            self.client.get_master_file_paths()
+        self.assertIn("Unexpected response format", str(ctx.exception))
 
     @patch("requests.get")
     def test_download_file(self, mock_get):
@@ -230,32 +290,64 @@ class TestScripMasterClient(unittest.TestCase):
 
 
 class TestScripMasterCLI(unittest.TestCase):
-    @patch("sys.argv", ["scrip_master.py", "--list-urls", "--token", "tok123"])
-    @patch.object(ScripMasterClient, "get_master_file_paths")
-    def test_cli_list_urls(self, mock_paths):
-        mock_paths.return_value = {
+    @patch("getpass.getpass", return_value="123456")
+    @patch("scrip_master.login_client")
+    @patch("sys.argv", ["scrip_master.py", "--list-urls"])
+    def test_cli_list_urls(self, mock_login, mock_getpass):
+        mock_client = MagicMock()
+        mock_client.scrip_master.return_value = {
             "filesPaths": ["https://example.com/nse_cm-v1.csv"],
             "baseFolder": "https://example.com",
         }
-        with patch("sys.stdout", new=io.StringIO()) as fake_out:
-            cli_main()
-            output = fake_out.getvalue()
-            self.assertIn("Base Folder:", output)
-            self.assertIn("https://example.com/nse_cm-v1.csv", output)
+        mock_login.return_value = mock_client
+        with patch.dict(os.environ, {
+            "CONSUMER_KEY": "ckey",
+            "MOBILE_NO": "1234567890",
+            "UCC": "ucc123",
+            "MPIN": "1234",
+        }):
+            with patch("sys.stdout", new=io.StringIO()) as fake_out:
+                cli_main()
+                output = fake_out.getvalue()
+                self.assertIn("Base Folder:", output)
+                self.assertIn("https://example.com/nse_cm-v1.csv", output)
 
-    @patch("sys.argv", ["scrip_master.py", "--download", "--token", "tok123"])
+    @patch("getpass.getpass", return_value="123456")
+    @patch("scrip_master.login_client")
+    @patch("sys.argv", ["scrip_master.py", "--download"])
     @patch.object(ScripMasterClient, "download_segments")
-    def test_cli_download_all_segments(self, mock_download):
+    def test_cli_download_all_segments(self, mock_download, mock_login, mock_getpass):
+        mock_login.return_value = MagicMock()
         mock_download.return_value = {"nse_cm": Path("scrip_master_data/nse_cm.csv")}
-        with patch("sys.stdout", new=io.StringIO()) as fake_out:
-            cli_main()
-            output = fake_out.getvalue()
-            self.assertIn("Successfully downloaded 1 segment file(s)", output)
-            mock_download.assert_called_once_with(segments=None, output_dir="scrip_master_data")
+        with patch.dict(os.environ, {
+            "CONSUMER_KEY": "ckey",
+            "MOBILE_NO": "1234567890",
+            "UCC": "ucc123",
+            "MPIN": "1234",
+        }):
+            with patch("sys.stdout", new=io.StringIO()) as fake_out:
+                cli_main()
+                output = fake_out.getvalue()
+                self.assertIn("Successfully downloaded 1 segment file(s)", output)
+                mock_download.assert_called_once_with(segments=None, output_dir="scrip_master_data")
+
+    @patch("getpass.getpass", return_value="123456")
+    @patch("scrip_master.login_client", return_value=None)
+    @patch("sys.argv", ["scrip_master.py", "--download"])
+    def test_cli_login_failure_exits(self, mock_login, mock_getpass):
+        with patch.dict(os.environ, {
+            "CONSUMER_KEY": "ckey",
+            "MOBILE_NO": "1234567890",
+            "UCC": "ucc123",
+            "MPIN": "1234",
+        }):
+            with self.assertRaises(SystemExit) as ctx:
+                cli_main()
+            self.assertEqual(ctx.exception.code, 1)
 
     @patch("sys.argv", ["scrip_master.py", "--search", "RELIANCE"])
     @patch.object(ScripMasterClient, "search_scrip")
-    def test_cli_search(self, mock_search):
+    def test_cli_search_no_auth_required(self, mock_search):
         mock_search.return_value = [
             {
                 "pSymbol": "2885",
@@ -265,11 +357,13 @@ class TestScripMasterCLI(unittest.TestCase):
                 "formattedExpiryDate": "N/A",
             }
         ]
-        with patch("sys.stdout", new=io.StringIO()) as fake_out:
-            cli_main()
-            output = fake_out.getvalue()
-            self.assertIn("Found 1 matching instrument(s)", output)
-            self.assertIn("RELIANCE-EQ", output)
+        # Environment is empty, verifying no auth is triggered
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("sys.stdout", new=io.StringIO()) as fake_out:
+                cli_main()
+                output = fake_out.getvalue()
+                self.assertIn("Found 1 matching instrument(s)", output)
+                self.assertIn("RELIANCE-EQ", output)
 
 
 if __name__ == "__main__":

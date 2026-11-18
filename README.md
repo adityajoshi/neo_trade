@@ -156,12 +156,17 @@ for r in results:
 
 ### 4. Historical Candle Data (`historical_data.py`)
 
-This tool downloads historical OHLCV candlestick data across arbitrary date ranges, automatically chunking requests according to interval constraints, validating against rate-limit safety rules, resolving symbols (such as `BEL`, `NIFTY`, `RELIANCE`) from local scrip master files, and executing concurrent calls under a single 2FA authentication session.
+This tool downloads historical OHLCV candlestick data across arbitrary date ranges, automatically chunking requests according to interval constraints, validating against rate-limit safety rules, resolving symbols (such as `BEL`, `NIFTY`, `RELIANCE`) from local scrip master files, and executing concurrent calls using consumer_key authentication.
 
 #### A. Basic Usage
 Fetch 15-minute historical candles for a stock:
 ```bash
 python historical_data.py --symbol BEL --from-date 2025-01-01 --to-date 2025-03-31 --interval 15min
+```
+
+You can also pass the consumer key directly via `--consumer-key` (or set `CONSUMER_KEY` in your `.env`):
+```bash
+python historical_data.py --symbol BEL --from-date 2025-01-01 --to-date 2025-03-31 --interval 15min --consumer-key your-consumer-key
 ```
 
 Fetch daily candles for an index:
@@ -184,7 +189,7 @@ The API imposes single-request date limits per interval. The script automaticall
 **Safety Pre-Checks:**
 * Rejects requests exceeding **15 chunks** before contacting the API to avoid `HTTP 429 Too Many Requests`.
 * Rejects dates prior to Kotak's retention inception date (`2021-01-01`) or future dates.
-* Prompts for TOTP **once** at startup; all chunks are fetched concurrently using a worker pool (`max_workers=5`).
+* Requires only `CONSUMER_KEY` (no 2FA / TOTP needed); all chunks are fetched concurrently using a worker pool (`max_workers=5`).
 * Automatically deduplicates timestamps and exports sorted candles to CSV in `historical_data_output/`.
 
 ## File Structure

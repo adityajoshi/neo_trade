@@ -6,7 +6,7 @@ Provides functionality to:
 1. Resolve symbols/scrips (e.g. 'BEL', 'NIFTY') to neosymbol (<segment>|<token>) via local scrip master cache.
 2. Validate date range and interval against predefined rate-limiting rules before firing requests.
 3. Slice date range into valid non-overlapping chunks per interval limits.
-4. Concurrently fetch candle data across all chunks under a single 2FA authentication session.
+4. Concurrently fetch candle data across all chunks using consumer_key authentication.
 5. Deduplicate, sort chronologically, and save results to CSV in a dedicated output directory.
 """
 
@@ -16,7 +16,6 @@ import csv
 import time
 import logging
 import argparse
-import getpass
 import concurrent.futures
 from pathlib import Path
 from datetime import datetime, timedelta, date
@@ -78,7 +77,7 @@ RETENTION_INCEPTION_DATE = date(2021, 1, 1)
 SUPPORTED_SEGMENTS = ["nse_cm", "nse_fo", "bse_cm", "bse_fo"]
 DEFAULT_OUTPUT_DIR = "historical_data_output"
 DEFAULT_SCRIP_DIR = "scrip_master_data"
-DEFAULT_BASE_URL: Optional[str] = None
+DEFAULT_BASE_URL = "https://napi.kotaksecurities.com"
 
 
 def require_env_vars(names: List[str]) -> None:
@@ -90,6 +89,27 @@ def require_env_vars(names: List[str]) -> None:
         raise RuntimeError(
             f"Missing required environment variables: {', '.join(missing)}"
         )
+
+
+def get_neo_client(
+    consumer_key: str,
+    environment: str = "prod",
+    neo_fin_key: Optional[str] = None,
+) -> Optional[Any]:
+    """
+    Initializes Kotak Neo NeoAPI client using only consumer_key.
+    Does not require 2FA (TOTP / MPIN) login for market-data/historical endpoints.
+    """
+    if NeoAPI is None:
+        raise RuntimeError("neo_api_client module is not installed.")
+
+    client = NeoAPI(
+        consumer_key=consumer_key,
+        environment=environment,
+        access_token=None,
+        neo_fin_key=neo_fin_key or None,
+    )
+    return client
 
 
 def login_client(totp: str, cred_details: Dict[str, Any]) -> Optional[Any]:
@@ -362,19 +382,41 @@ class HistoricalDataClient:
     ) -> List[List[Any]]:
         """
         Fetches candle data for a single date chunk.
-        Handles rate-limiting (HTTP 429) with retries and exponential backoff.
+        Handles rate-limiting (HTTP 429 / SDK rateLimit) with retries and exponential backoff.
         """
         if self.client and hasattr(self.client, "historical_data"):
-            try:
-                res = self.client.historical_data(
-                    neosymbol=neosymbol,
-                    fromdate=from_date,
-                    todate=to_date,
-                    interval=interval,
-                )
-                return self._parse_candles(res)
-            except Exception as e:
-                _LOGGER.warning("SDK historical_data method raised %s, attempting REST call fallback", e)
+            for attempt in range(max_retries):
+                try:
+                    res = self.client.historical_data(
+                        neosymbol=neosymbol,
+                        interval=interval,
+                        from_date=from_date,
+                        to_date=to_date,
+                    )
+                    if isinstance(res, dict) and "rateLimit" in res:
+                        rate_limit_info = res["rateLimit"]
+                        retry_after = 1.5 * (attempt + 1)
+                        if isinstance(rate_limit_info, dict) and "Retry-After" in rate_limit_info:
+                            try:
+                                retry_after = float(rate_limit_info["Retry-After"])
+                            except (ValueError, TypeError):
+                                pass
+                        elif isinstance(rate_limit_info, (int, float, str)):
+                            try:
+                                retry_after = float(rate_limit_info)
+                            except (ValueError, TypeError):
+                                pass
+                        _LOGGER.warning(
+                            "SDK rate limit encountered for chunk %s to %s. Retrying in %.1fs (attempt %d/%d)...",
+                            from_date, to_date, retry_after, attempt + 1, max_retries
+                        )
+                        time.sleep(retry_after)
+                        continue
+
+                    return self._parse_candles(res)
+                except Exception as e:
+                    _LOGGER.warning("SDK historical_data method raised %s, attempting REST call fallback", e)
+                    break
 
         if not self.base_url:
             raise RuntimeError(
@@ -386,6 +428,8 @@ class HistoricalDataClient:
         endpoint = f"{self.base_url}/market-data/1.0/historical/details"
         params = {
             "neosymbol": neosymbol,
+            "from_date": from_date,
+            "to_date": to_date,
             "fromdate": from_date,
             "todate": to_date,
             "interval": interval,
@@ -476,6 +520,7 @@ def save_candles_to_csv(
 ) -> Path:
     """
     Saves candle rows into CSV file in the standard format.
+    Pads rows with 6 elements to 7 elements with '' for unpopulated Phase 1 'oi'.
     """
     path = Path(output_path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -485,7 +530,10 @@ def save_candles_to_csv(
         writer = csv.writer(f)
         writer.writerow(header)
         for c in candles:
-            writer.writerow(c)
+            row = list(c)
+            if len(row) == 6:
+                row.append("")  # Phase 1: oi unpopulated
+            writer.writerow(row)
 
     return path
 
@@ -543,9 +591,14 @@ def main() -> None:
         help="Maximum concurrent workers for simultaneous requests (default: 5)",
     )
     parser.add_argument(
+        "--consumer-key",
+        default=None,
+        help="Kotak Neo API consumer key (overrides CONSUMER_KEY environment variable)",
+    )
+    parser.add_argument(
         "--base-url",
         default=None,
-        help="Optional base URL override (by default dynamically derived from login validation)",
+        help="Optional base URL override (defaults to NEO_BASE_URL env var or https://napi.kotaksecurities.com)",
     )
 
     args = parser.parse_args()
@@ -577,33 +630,35 @@ def main() -> None:
         print(f"Symbol Resolution Error: {e}", file=sys.stderr)
         sys.exit(1)
 
-    # Step 3: Single 2FA Authentication
-    try:
-        require_env_vars(["CONSUMER_KEY", "MOBILE_NO", "UCC", "MPIN"])
-    except RuntimeError as e:
-        print(f"Authentication Config Error: {e}", file=sys.stderr)
+    # Step 3: Authentication (only consumer_key required)
+    consumer_key = args.consumer_key or os.getenv("CONSUMER_KEY")
+    if not consumer_key:
+        print(
+            "Authentication Error: CONSUMER_KEY is required. "
+            "Please provide --consumer-key or set CONSUMER_KEY environment variable.",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
-    cred_details = {
-        "neo_fin_key": os.getenv("NEO_FIN_KEY"),
-        "consumer_key": os.getenv("CONSUMER_KEY"),
-        "ucc": os.getenv("UCC"),
-        "mobno": os.getenv("MOBILE_NO"),
-        "mpin": os.getenv("MPIN"),
-    }
-
-    totp = getpass.getpass("Enter TOTP: ")
-    neo_client = login_client(totp, cred_details)
-    if not neo_client:
-        print("Failed to authenticate with Kotak Neo. Exiting.", file=sys.stderr)
-        sys.exit(1)
+    neo_fin_key = os.getenv("NEO_FIN_KEY")
+    neo_client = None
+    if NeoAPI is not None:
+        try:
+            neo_client = get_neo_client(
+                consumer_key=consumer_key,
+                environment="prod",
+                neo_fin_key=neo_fin_key,
+            )
+            print("Initialized Kotak Neo API client with consumer_key.")
+        except Exception as e:
+            _LOGGER.warning("Could not initialize NeoAPI client: %s. Using REST fallback.", e)
 
     # Step 4: Simultaneous chunk fetching
     client = HistoricalDataClient(
         client=neo_client,
         base_url=args.base_url,
         max_workers=args.max_workers,
-        consumer_key=cred_details["consumer_key"],
+        consumer_key=consumer_key,
     )
 
     print(f"Fetching {len(chunks)} chunk(s) concurrently (max_workers={args.max_workers})...")

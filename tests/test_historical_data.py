@@ -30,11 +30,13 @@ from historical_data import (
     MAX_ALLOWED_CHUNKS,
     MAX_TOTAL_SPAN_DAYS,
     RETENTION_INCEPTION_DATE,
+    DEFAULT_BASE_URL,
     parse_date,
     validate_and_generate_chunks,
     resolve_neosymbol,
     HistoricalDataClient,
     save_candles_to_csv,
+    get_neo_client,
     login_client,
     main as cli_main,
 )
@@ -171,6 +173,7 @@ class TestHistoricalDataClient(unittest.TestCase):
 
     def test_missing_base_url_raises_error(self):
         client_no_url = HistoricalDataClient(consumer_key="test-key")
+        client_no_url.base_url = None
         with self.assertRaises(RuntimeError) as ctx:
             client_no_url.fetch_chunk("nse_cm|383", "2025-01-01", "2025-01-10", "15min")
         self.assertIn("Base URL is not available", str(ctx.exception))
@@ -180,6 +183,43 @@ class TestHistoricalDataClient(unittest.TestCase):
         mock_neo_client.base_url = "https://cluster.kotaksecurities.com"
         client = HistoricalDataClient(client=mock_neo_client)
         self.assertEqual(client.base_url, "https://cluster.kotaksecurities.com")
+
+    def test_sdk_fetch_chunk_success(self):
+        mock_neo = MagicMock()
+        mock_neo.historical_data.return_value = {
+            "status": "success",
+            "interval": "15min",
+            "data": {
+                "candles": [
+                    ["2025-01-01T09:15:00+0530", 100.0, 105.0, 99.5, 104.0, 5000, 0]
+                ]
+            },
+        }
+        client = HistoricalDataClient(client=mock_neo, consumer_key="ckey")
+        candles = client.fetch_chunk("nse_cm|383", "2025-01-01", "2025-01-10", "15min")
+        self.assertEqual(len(candles), 1)
+        mock_neo.historical_data.assert_called_once_with(
+            neosymbol="nse_cm|383",
+            interval="15min",
+            from_date="2025-01-01",
+            to_date="2025-01-10",
+        )
+
+    @patch("time.sleep")
+    def test_sdk_fetch_chunk_rate_limit_retry(self, mock_sleep):
+        mock_neo = MagicMock()
+        mock_neo.historical_data.side_effect = [
+            {"status": "ERROR", "rateLimit": {"Retry-After": "0.5"}},
+            {
+                "status": "success",
+                "data": {"candles": [["2025-01-01T09:15:00+0530", 10, 20, 5, 15, 100, 0]]},
+            },
+        ]
+        client = HistoricalDataClient(client=mock_neo, consumer_key="ckey")
+        candles = client.fetch_chunk("nse_cm|383", "2025-01-01", "2025-01-10", "15min")
+        self.assertEqual(len(candles), 1)
+        self.assertEqual(mock_neo.historical_data.call_count, 2)
+        mock_sleep.assert_called_once_with(0.5)
 
     @patch("requests.get")
     def test_fetch_chunk_success(self, mock_get):
@@ -275,6 +315,16 @@ class TestCSVExport(unittest.TestCase):
         self.assertIn("2025-01-01T09:15:00+0530,100.0,105.0,99.0,104.5,12345,0", lines[1])
         self.assertEqual(len(lines), 3)
 
+    def test_save_candles_to_csv_pads_6_elements_to_7(self):
+        candles = [
+            ["2025-01-01T09:15:00+0530", 100.0, 105.0, 99.0, 104.5, 12345]  # No oi (Phase 1)
+        ]
+        out_file = Path(self.test_dir) / "pad_test.csv"
+        save_candles_to_csv(candles, out_file)
+        lines = out_file.read_text().strip().split("\n")
+        self.assertEqual(lines[0], "timestamp,open,high,low,close,volume,oi")
+        self.assertEqual(lines[1], "2025-01-01T09:15:00+0530,100.0,105.0,99.0,104.5,12345,")
+
 
 class TestHistoricalDataCLI(unittest.TestCase):
     def setUp(self):
@@ -305,11 +355,27 @@ class TestHistoricalDataCLI(unittest.TestCase):
                 self.assertEqual(ctx.exception.code, 1)
                 self.assertIn("Validation Error", fake_err.getvalue())
 
-    @patch("getpass.getpass", return_value="123456")
-    @patch("historical_data.login_client")
+    def test_cli_missing_consumer_key_exits(self):
+        test_args = [
+            "historical_data.py",
+            "--symbol", "BEL",
+            "--from-date", "2025-01-01",
+            "--to-date", "2025-01-10",
+            "--interval", "15min",
+            "--scrip-dir", str(self.scrip_dir),
+        ]
+        with patch.dict(os.environ, {}, clear=True):
+            with patch("sys.argv", test_args):
+                with patch("sys.stderr", new=io.StringIO()) as fake_err:
+                    with self.assertRaises(SystemExit) as ctx:
+                        cli_main()
+                    self.assertEqual(ctx.exception.code, 1)
+                    self.assertIn("CONSUMER_KEY is required", fake_err.getvalue())
+
+    @patch("historical_data.get_neo_client")
     @patch.object(HistoricalDataClient, "fetch_historical_data")
-    def test_cli_success_saves_csv_in_output_dir(self, mock_fetch, mock_login, mock_getpass):
-        mock_login.return_value = MagicMock()
+    def test_cli_success_saves_csv_in_output_dir(self, mock_fetch, mock_get_client):
+        mock_get_client.return_value = MagicMock()
         mock_fetch.return_value = [
             ["2025-01-01T09:15:00+0530", 100, 105, 99, 104, 5000, 0]
         ]
@@ -323,25 +389,37 @@ class TestHistoricalDataCLI(unittest.TestCase):
             "--interval", "15min",
             "--scrip-dir", str(self.scrip_dir),
             "--output-dir", str(out_dir),
+            "--consumer-key", "my-test-consumer-key",
         ]
 
-        with patch.dict(os.environ, {
-            "CONSUMER_KEY": "ckey",
-            "MOBILE_NO": "1234567890",
-            "UCC": "ucc123",
-            "MPIN": "1234",
-        }):
+        with patch.dict(os.environ, {}, clear=True):
             with patch("sys.argv", test_args):
                 with patch("sys.stdout", new=io.StringIO()) as fake_out:
                     cli_main()
                     output = fake_out.getvalue()
                     self.assertIn("Resolved symbol 'BEL' -> neosymbol: nse_cm|383", output)
+                    self.assertIn("Initialized Kotak Neo API client with consumer_key", output)
                     self.assertIn("Successfully saved 1 candle(s)", output)
 
         # Verify output file generated in out_dir
         generated_csvs = list(out_dir.glob("*.csv"))
         self.assertEqual(len(generated_csvs), 1)
         self.assertIn("BEL_nse_cm_15min", generated_csvs[0].name)
+
+
+class TestGetNeoClient(unittest.TestCase):
+    @patch("historical_data.NeoAPI")
+    def test_get_neo_client_initialization(self, MockNeoAPI):
+        mock_instance = MagicMock()
+        MockNeoAPI.return_value = mock_instance
+        client = get_neo_client(consumer_key="key123", neo_fin_key="fin456")
+        MockNeoAPI.assert_called_once_with(
+            consumer_key="key123",
+            environment="prod",
+            access_token=None,
+            neo_fin_key="fin456",
+        )
+        self.assertEqual(client, mock_instance)
 
 
 class TestHistoricalDataLogin(unittest.TestCase):
